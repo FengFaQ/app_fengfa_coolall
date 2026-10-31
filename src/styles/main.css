@@ -1,0 +1,149 @@
+:root {
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-hover: #f0f2f5;
+  --border: #e5e7eb;
+  --text: #1f2329;
+  --text-secondary: #6b7280;
+  --accent: #48ae4c;
+  --accent-soft: #e8f5e9;
+  --danger: #e54d42;
+  --radius: 10px;
+  --max-width: 760px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c;
+    --surface: #1e2025;
+    --surface-hover: #26282e;
+    --border: #2f3238;
+    --text: #e6e8eb;
+    --text-secondary: #9aa0a6;
+    --accent: #57c15b;
+    --accent-soft: #1e3a20;
+    --danger: #ef6b61;
+  }
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    'PingFang SC', -apple-system, BlinkMacSystemFont, 'Microsoft YaHei',
+    'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+.center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.page {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  transition: background 0.15s ease;
+}
+
+.card:hover {
+  background: var(--surface-hover);
+}
+
+.muted {
+  color: var(--text-secondary);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  transition: background 0.15s ease;
+  font-size: 13px;
+}
+
+.btn:hover {
+  background: var(--surface-hover);
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.06);
+  background: var(--accent);
+}
+
+.state {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.skeleton {
+  height: 88px;
+  border-radius: var(--radius);
+  background: linear-gradient(
+    90deg,
+    var(--surface) 25%,
+    var(--surface-hover) 50%,
+    var(--surface) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.3s infinite;
+  margin-bottom: 10px;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}

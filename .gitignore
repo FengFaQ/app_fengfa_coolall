@@ -1,0 +1,46 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+src-tauri/target/
+*.tsbuildinfo
+
+# 参考上游仓库（仅本地分析用，不入库）
+_upstream/
+
+# 本机凭据，严禁入库
+.secrets/
+
+# Rust
+**/*.rs.bk
+
+# 测试与覆盖率
+coverage/
+
+# 临时文件
+*.tmp
+*.log
+*.swp
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.vscode/
+.idea/
+*.iml
+
+# 本机环境
+.env
+.env.local
+local.properties
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 临时验证 crate（本地交叉校验用，不入库）
+tools/rs-probe/
+
+# Tauri 自动生成的 schema
+src-tauri/gen/
