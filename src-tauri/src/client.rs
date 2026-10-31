@@ -118,7 +118,7 @@ impl CoolapkClient {
         if let Some(dir) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 // 只记路径与错误类型，不记文件内容
-                eprintln!("[coolall] 创建配置目录失败 dir={dir:?} err={e}");
+                log::warn!("创建配置目录失败 dir={dir:?} err={e}");
                 return;
             }
         }
@@ -129,10 +129,10 @@ impl CoolapkClient {
         match serde_json::to_string_pretty(&cfg) {
             Ok(text) => {
                 if let Err(e) = std::fs::write(&path, text) {
-                    eprintln!("[coolall] 写入身份配置失败 path={path:?} err={e}");
+                    log::warn!("写入身份配置失败 path={path:?} err={e}");
                 }
             }
-            Err(e) => eprintln!("[coolall] 序列化身份配置失败 err={e}"),
+            Err(e) => log::warn!("序列化身份配置失败 err={e}"),
         }
     }
 
@@ -153,7 +153,7 @@ impl CoolapkClient {
         };
         if let Some(dir) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(dir) {
-                eprintln!("[coolall] 创建会话目录失败 dir={dir:?} err={e}");
+                log::warn!("创建会话目录失败 dir={dir:?} err={e}");
                 return;
             }
         }
@@ -170,10 +170,10 @@ impl CoolapkClient {
         match serde_json::to_string_pretty(&snapshot) {
             Ok(text) => {
                 if let Err(e) = std::fs::write(&path, text) {
-                    eprintln!("[coolall] 写入会话文件失败 path={path:?} err={e}");
+                    log::warn!("写入会话文件失败 path={path:?} err={e}");
                 }
             }
-            Err(e) => eprintln!("[coolall] 序列化会话失败 err={e}"),
+            Err(e) => log::warn!("序列化会话失败 err={e}"),
         }
     }
 
@@ -196,15 +196,18 @@ impl CoolapkClient {
     /// 发一次请求。内部完成头拼装、Cookie 回写、错误分类。
     async fn send(&self, base: &str, path: &str) -> Result<Value, Error> {
         let url = format!("{base}{path}");
-        let request = HttpRequest::get(url, self.headers_map().await);
+        let request = HttpRequest::get(url.clone(), self.headers_map().await);
 
-        let response = self
-            .http
-            .execute(request)
-            .await
-            .map_err(|error| Error::Network {
+        log::info!("请求 {url}");
+
+        let response = self.http.execute(request).await.map_err(|error| {
+            log::warn!("请求失败 {url}：{}", error.message);
+            Error::Network {
                 message: error.message,
-            })?;
+            }
+        })?;
+
+        log::info!("响应 {url} status={}", response.status);
 
         self.process_response(response).await
     }
@@ -383,6 +386,7 @@ impl CoolapkClient {
                     Error::CaptchaNeeded { .. } | Error::AuthRequired
                 ) && self.allow_public_fallback;
                 if may_degrade && id.chars().all(|c| c.is_ascii_digit()) {
+                    log::info!("    降级到公开页 id={id}");
                     let public_url = format!("{}/feed/{}", constants::PUBLIC_URL, id);
                     // 公开页不需要协议头，用空头即可
                     let request =
@@ -434,6 +438,7 @@ impl CoolapkClient {
     /// 记录挑战，供后续重放使用。
     fn track_challenge(&mut self, result: &Result<Value, Error>, base: &str, path: &str) {
         if let Err(Error::CaptchaNeeded { challenge }) = result {
+            log::info!("    需要人机验证 id={} field={}", challenge.id, challenge.field);
             self.pending_captcha = Some(PendingCaptcha {
                 id: challenge.id.clone(),
                 field: challenge.field.clone(),
@@ -485,6 +490,7 @@ impl CoolapkClient {
             let mut guard = self.session.lock().await;
             guard.accept_validation(proof);
         }
+        log::info!("    验证凭证已写入，开始重放");
 
         // 写凭证后立刻重放，把最初失败的请求补上
         match self.retry_after_validation(&pending).await {
@@ -859,6 +865,8 @@ mod tests {
         assert_eq!(BrowseTarget::parse("nope"), None);
     }
 }
+
+
 
 
 

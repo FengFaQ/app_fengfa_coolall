@@ -1,4 +1,4 @@
-﻿//! coolall —— 非官方酷安客户端
+//! coolall —— 非官方酷安客户端
 //!
 //! 工程结构：
 //!
@@ -61,16 +61,99 @@ impl<T> InvokeResult<T> {
     }
 }
 
+/// 日志目录：优先用 exe 所在目录，失败则回退到系统临时目录。
+///
+/// 设计意图：出问题时用户能在安装目录直接找到 `coolall.log`，
+/// 不用去 `%LOCALAPPDATA%` 里翻。
+///
+/// 为什么可能失败：NSIS 默认安装到 `%LOCALAPPDATA%\Programs\coolall`，
+/// 那里可写；但如果用户装到 Program Files，普通用户无写权限。
+fn log_dir_near_exe() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .filter(|d| {
+            // 探测可写性：在目录里创建一个临时文件再删掉
+            let probe = d.join(".write_probe");
+            match std::fs::write(&probe, b"") {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&probe);
+                    true
+                }
+                Err(_) => false,
+            }
+        })
+        .unwrap_or_else(std::env::temp_dir)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // `manage` / `try_state` 来自 Manager trait
     use tauri::Manager;
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::default().build())
+        // 日志配置：同时输出到控制台和 exe 同目录下的 coolall.log
+        //
+        // 为什么不写 AppData（LogDir 的默认行为）：
+        // 出问题时用户可以直接在安装目录找到日志发过来，
+        // 不用去 %LOCALAPPDATA% 里翻。这是为排查方便刻意选的。
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Folder {
+                        path: log_dir_near_exe(),
+                        file_name: Some("coolall".into()),
+                    },
+                ))
+                .max_file_size(2 * 1024 * 1024)
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        // 注册验证页的自定义协议。
+        //
+        // 必须走自定义协议而不是外部 https 域名：Tauri 的 IPC 权限检查
+        // 会拒绝远程来源调用命令（`webview/mod.rs:2080` 的 `!is_local` 分支），
+        // 而 `is_local_url()` 只认 tauri:// 、app 相对路径、用户注册的自定义协议。
+        //
+        // captchaId 通过 URL 查询参数传入，页面向它读取——
+        // 这样 HTML 是静态的，不依赖「导航后立即 eval」的时序。
+        .register_uri_scheme_protocol(captcha_window::CAPTCHA_PROTOCOL, |ctx, request| {
+            use tauri::http::Response;
+
+            // 从查询参数里取 captchaId
+            let captcha_id = request
+                .uri()
+                .query()
+                .and_then(|q| {
+                    q.split('&')
+                        .find_map(|kv| kv.strip_prefix("captchaId="))
+                })
+                .unwrap_or("");
+
+            let html = captcha_window::build_captcha_html(captcha_id);
+            let _ = ctx;
+
+            Response::builder()
+                .header("Content-Type", "text/html; charset=utf-8")
+                // 只允许加载易盾脚本与连接易盾接口
+                .header(
+                    "Content-Security-Policy",
+                    "default-src 'none'; \
+                     script-src 'unsafe-inline' https://cstaticdun.126.net; \
+                     connect-src https://*.dun.163.com https://*.163yun.com https://cstaticdun.126.net; \
+                     style-src 'unsafe-inline'; \
+                     img-src data: https:; \
+                     frame-src https://*.dun.163.com; \
+                     object-src 'none'; base-uri 'none'; form-action 'none'",
+                )
+                .body(html.into_bytes())
+                .expect("构造验证页响应失败")
+        })
         .setup(|app| {
             let client = client::CoolapkClient::new(app.handle())?;
             app.manage(AppState {

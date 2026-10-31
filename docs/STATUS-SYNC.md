@@ -378,3 +378,69 @@ Tauri 官方文档明确说明：**`cookies()` 在 Windows 的同步命令里会
 
 3. 如果 `cookies()` 方案失败，备选方案是什么？
    我想到的是 WebView2 的 CDP，但那是 Windows 专有且不够稳定。
+
+## 更新（第八次同步，2026-10-31 22:38）
+
+### 你不需要回答第六轮的问题了——我自己查到了
+
+我去精读了 `CaptchaActivity.kt`，发现**我前两版实现都错了**。
+
+### 真实机制
+
+参考项目**不是打开酷安验证页**，而是自己构造 HTML：
+
+```kotlin
+// CaptchaActivity.kt 第 107-121 行
+private fun html(id: String) = """
+  ...
+  script.src='https://cstaticdun.126.net/load.min.js';
+  script.onload=function(){
+    initNECaptcha({
+      captchaId:'$id',                      // ← 挑战 id
+      onVerify:function(err,data){
+        if(!err&&data&&data.validate){
+          window.CaptchaResult.postMessage(data.validate);   // ← JS 桥回传
+        }
+      }
+    },...)
+  };
+"""
+```
+
+配套原生侧用 `WebViewCompat.addWebMessageListener(this, "CaptchaResult", ...)` 接收。
+
+### 我错在哪
+
+| 版本 | 做法 | 为什么错 |
+| --- | --- | --- |
+| v1 | 外部浏览器 + 手动粘贴 | 外部 Cookie 读不到；该页面不产生 validate |
+| v2 | 内嵌 WebView 读 Cookie | 还是打开那个页面，它压根不产生 validate |
+| **v3（当前）** | **自建页面 + 易盾 SDK + IPC 回传** | ✅ 与参考项目一致 |
+
+根因：`validate` 是**易盾 JS 回调里的值**，不是 Cookie。
+我之前假设「存在 Cookie 里」是错的。
+
+### 当前实现
+
+- `build_captcha_html(captcha_id)` 构造页面，captchaId 来自挑战
+- captchaId 只保留字母数字（防注入），有测试覆盖
+- 页面通过 `__TAURI_INTERNALS__.invoke('captcha_result', ...)` 回传
+- `client.rs` 加 `staged_validate` 暂存，用户点确认才真正重放
+- 验证窗口只给 `core:default`，不给文件/对话框/store
+
+### 需要你评估
+
+1. 我的 HTML 与参考项目相比**漏了什么**？
+   （参考项目还设了 `allowFileAccess=false`、`mixedContentMode=NEVER_ALLOW`、
+   `shouldOverrideUrlLoading` 拦截——Tauri 里怎么等价实现？）
+
+2. `base url` 我改成了 `https://captcha.coolall.invalid/`，
+   参考项目用的是 `https://captcha.c001apk.invalid/`。
+   这种无效域名 + `loadDataWithBaseURL` 的做法，Tauri 里用
+   `WebviewUrl::External(base)` + `eval` 写入，是否等价？
+
+3. 易盾 SDK 加载失败（网络问题）时用户体验怎么兜底？
+
+### 当前测试基线
+
+Rust 核心 47 + 外壳 19，前端 24。

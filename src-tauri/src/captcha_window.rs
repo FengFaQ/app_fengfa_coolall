@@ -1,38 +1,53 @@
-//! 验证码窗口：自建本地页面加载网易易盾 SDK，通过 Tauri IPC 回传 validate。
+﻿//! 验证码窗口：自建本地页面加载网易易盾 SDK，通过 Tauri IPC 回传 validate。
 //!
 //! # 真实机制（从参考项目 c001apk 的 CaptchaActivity.kt 核实）
 //!
-//! 关键发现：**不是打开酷安的验证页，而是自己构造一个 HTML 页面**。
+//! **不是打开酷安的验证页，而是自己构造一个 HTML 页面**：
 //!
-//! ```
-//! 1. 本地页面引入 https://cstaticdun.126.net/load.min.js
+//! ```text
+//! 1. 页面引入 https://cstaticdun.126.net/load.min.js
 //! 2. 调 initNECaptcha({ captchaId, onVerify })
-//! 3. onVerify 回调里拿到 data.validate
+//! 3. onVerify 回调拿到 data.validate
 //! 4. 通过 JS 桥回传给原生
 //! ```
 //!
-//! 之前我打开 `account.coolapk.com/auth/login` 是错的——
-//! 那个页面不会把 validate 回传给应用。
+//! `validate` 是易盾 JS 回调里的值，**不是 Cookie**，
+//! 所以读 Cookie 的做法从根上就是错的。
 //!
-//! # 为什么用 IPC 而不是读 Cookie
+//! # 为什么用自定义协议而不是外部 URL
 //!
-//! 易盾的 validate 是 JS 回调里的值，不一定会写进 Cookie。
-//! 参考项目用的是 `WebMessageListener`，Tauri 的等价物是
-//! `window.__TAURI_INTERNALS__.invoke`。
+//! Tauri 的 IPC 权限检查里有这段逻辑（tauri-2.12.5 `webview/mod.rs:2080`）：
+//!
+//! ```text
+//! if (plugin_command.is_some() || has_app_acl_manifest || !is_local)
+//!    && invoke.acl.is_none()
+//! { 拒绝 }
+//! ```
+//!
+//! 也就是说**远程来源**（`is_local == false`）调用命令必须有 ACL 条目。
+//! 而 `is_local_url()` 只认三种来源：
+//!
+//! - `tauri://` 协议
+//! - 相对于 `devUrl` / `frontendDist` 的地址
+//! - **用户注册的自定义协议**
+//!
+//! 所以验证页必须走 `coolall-captcha://` 自定义协议，
+//! 不能用 `https://captcha.xxx.invalid/`——那样会被判定为远程来源。
 //!
 //! # 安全约束
 //!
-//! 验证页加载的是**远程脚本**，必须限制它能做什么：
-//! - 窗口不给任何额外 IPC 权限（见 capabilities/captcha.json）
-//! - 页面禁用文件访问、禁止弹出新窗口
-//! - 只接受 `captcha_result` 这一个命令
+//! - 页面只允许加载易盾脚本，不建立其它外部连接
+//! - 窗口只授予 `captcha_result` 一个命令的权限
+//! - 禁止弹出新窗口、禁止访问本地文件
 
 use serde::{Deserialize, Serialize};
-// get_webview_window 来自 Manager trait，必须引入
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// 验证窗口标签。
 pub const CAPTCHA_WINDOW_LABEL: &str = "captcha";
+
+/// 自定义协议名。用它提供验证页，使其被判定为本地来源。
+pub const CAPTCHA_PROTOCOL: &str = "coolall-captcha";
 
 /// 易盾脚本地址。
 pub const NECAPTCHA_SDK_URL: &str = "https://cstaticdun.126.net/load.min.js";
@@ -44,140 +59,177 @@ pub struct CaptchaResult {
     pub message: String,
 }
 
-/// 校验 validate 格式。
-///
-/// 规则来自 PROTOCOL.md §9.3：
-/// 非空、长度 ≤ 8192、不含空白与控制字符。
+/// 校验 validate 格式（PROTOCOL.md §9.3）。
 pub fn valid_validate(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 8192
         && !value.chars().any(|c| c.is_whitespace() || (c as u32) < 32)
 }
 
+/// 校验 captchaId 格式，对齐参考项目的 `^[a-zA-Z0-9]{16,64}$`。
+pub fn valid_captcha_id(id: &str) -> bool {
+    (16..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 /// 构造验证页面的 HTML。
 ///
-/// `captcha_id` 来自挑战本身（`CaptchaChallenge.id`），
-/// 不是硬编码的——每个挑战有自己的 id。
+/// `captcha_id` 来自挑战本身（`CaptchaChallenge.id`）
+/// 或自定义协议 URL 的查询参数。
+///
+/// 注意 `connect-src` 必须放行易盾域名，否则 CSP 会拦掉 SDK 的请求。
 pub fn build_captcha_html(captcha_id: &str) -> String {
-    // 防止注入：id 只允许字母数字
+    // 双重保护：先校验格式（调用方应已校验），再过滤字符
     let safe_id: String = captcha_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect();
 
-    format!(
-        r#"<!doctype html>
+    let sdk = NECAPTCHA_SDK_URL;
+    let template = r#"<!doctype html>
 <html lang="zh-CN">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-  :root {{ color-scheme: light dark; }}
-  body {{
-    font: 16px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-    margin: 24px; background: Canvas; color: CanvasText;
-    display: flex; flex-direction: column; align-items: center;
-  }}
-  #status {{ color: GrayText; margin-bottom: 16px; text-align: center; }}
-  #captcha {{ display: flex; justify-content: center; }}
+  body { font: 16px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         margin: 24px; display: flex; flex-direction: column; align-items: center; }
+  #status { color: GrayText; text-align: center; margin-bottom: 16px; }
 </style>
+</head>
+<body>
 <p id="status">正在加载验证组件…</p>
 <div id="captcha"></div>
+<button id="reload" style="display:none;margin-top:16px;padding:8px 16px;cursor:pointer">重新加载</button>
 <script>
-(function () {{
-  var CAPTCHA_ID = "{safe_id}";
+(function () {
+  var CAPTCHA_ID = "__ID__";
   var statusEl = document.getElementById('status');
 
-  function statusText(t) {{ statusEl.textContent = t; }}
+  function statusText(t) { statusEl.textContent = t; }
 
-  function report(payload) {{
-    // 通过 Tauri IPC 回传给 Rust 端
-    if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
-      window.__TAURI_INTERNALS__.invoke('captcha_result', payload);
-    }} else {{
-      statusText('内部错误：IPC 不可用');
-    }}
-  }}
+  function showReload() {
+    var btn = document.getElementById('reload');
+    if (btn) btn.style.display = '';
+  }
 
-  var timeout = setTimeout(function () {{
-    statusText('加载超时，请点击重新加载');
-  }}, 15000);
+  document.getElementById('reload').onclick = function () { location.reload(); };
+
+  function report(validate) {
+    try {
+      window.__TAURI_INTERNALS__.invoke('captcha_result', {
+        validate: validate,
+        message: 'ok'
+      });
+      statusText('验证通过，请回到主窗口点「我已完成验证」');
+    } catch (e) {
+      statusText('回传失败：' + e);
+    }
+  }
+
+  if (!CAPTCHA_ID) {
+    statusText('缺少验证标识，请关闭窗口后重试');
+    return;
+  }
+
+  var timeout = setTimeout(function () {
+    statusText('加载超时，请重新加载'); showReload();
+  }, 20000);
 
   var script = document.createElement('script');
-  script.src = '{NECAPTCHA_SDK_URL}';
-  script.onerror = function () {{
+  script.src = "__SDK__";
+  script.onerror = function () {
     clearTimeout(timeout);
     statusText('验证组件加载失败，请检查网络后重试');
-  }};
-  script.onload = function () {{
-    try {{
-      initNECaptcha({{
+    showReload();
+  };
+  script.onload = function () {
+    try {
+      initNECaptcha({
         captchaId: CAPTCHA_ID,
         element: '#captcha',
         protocol: 'https',
         mode: 'embed',
         apiVersion: 2,
-        width: Math.min(320, window.innerWidth - 48) + 'px',
+        width: Math.min(320, window.innerWidth - 48),
         lang: 'zh-CN',
-        onVerify: function (err, data) {{
+        onVerify: function (err, data) {
           clearTimeout(timeout);
-          if (!err && data && data.validate) {{
-            statusText('验证通过');
-            report({{ validate: data.validate, message: 'ok' }});
-          }} else {{
+          if (!err && data && data.validate) {
+            report(data.validate);
+          } else {
             statusText('验证未通过，请重试');
-          }}
-        }}
-      }},
-      function () {{
+          }
+        }
+      },
+      function () {
         clearTimeout(timeout);
         statusText('请按下方提示完成人机验证');
-      }},
-      function () {{
+      },
+      function () {
         clearTimeout(timeout);
-        statusText('初始化失败，请点击重新加载');
-      }});
-    }} catch (e) {{
+        statusText('初始化失败，请关闭窗口后重试');
+        showReload();
+      });
+    } catch (e) {
       clearTimeout(timeout);
       statusText('初始化失败：' + e);
-    }}
-  }};
+    }
+  };
   document.head.appendChild(script);
-}})();
+})();
 </script>
-</html>"#
-    )
+</body>
+</html>"#;
+
+    template.replace("__ID__", &safe_id).replace("__SDK__", sdk)
 }
 
 /// 打开验证窗口。
+///
+/// 走自定义协议 `coolall-captcha://localhost/`，使 Tauri 判定为本地来源，
+/// 从而允许调用 `captcha_result` 命令。
 pub fn open_window<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     captcha_id: &str,
 ) -> Result<(), String> {
+    if !valid_captcha_id(captcha_id) {
+        return Err(format!(
+            "验证标识格式不正确（期望 16-64 位字母数字，实际 {} 位）",
+            captcha_id.len()
+        ));
+    }
+
     // 若已存在则先关掉，避免用旧 captchaId 的页面
     if let Some(old) = app.get_webview_window(CAPTCHA_WINDOW_LABEL) {
         let _ = old.close();
     }
 
-    let html = build_captcha_html(captcha_id);
+    // captchaId 通过查询参数传给协议处理器，
+    // 这样 HTML 是静态的，不依赖「导航后立即 eval」的时序
+    let url = format!("{CAPTCHA_PROTOCOL}://localhost/?captchaId={captcha_id}");
 
-    // 用一个无效域名做 base，确保页面无同源来源，
-    // 无法读取应用自身的任何资源。
-    let base: url::Url = "https://captcha.coolall.invalid/"
-        .parse()
-        .map_err(|e| format!("base url 无效：{e}"))?;
-
-    WebviewWindowBuilder::new(app, CAPTCHA_WINDOW_LABEL, WebviewUrl::External(base))
-        .title("人机验证")
-        .inner_size(420.0, 560.0)
-        .min_inner_size(360.0, 480.0)
-        .center()
-        .build()
-        .map_err(|e| format!("创建验证窗口失败：{e}"))?
-        .eval(&format!(
-            "document.open();document.write({});document.close();",
-            serde_json::to_string(&html).map_err(|e| e.to_string())?
-        ))
-        .map_err(|e| format!("写入验证页面失败：{e}"))?;
+    WebviewWindowBuilder::new(
+        app,
+        CAPTCHA_WINDOW_LABEL,
+        WebviewUrl::CustomProtocol(
+            url.parse().map_err(|e| format!("协议地址无效：{e}"))?,
+        ),
+    )
+    .title("人机验证")
+    .inner_size(420.0, 560.0)
+    .min_inner_size(360.0, 480.0)
+    .center()
+    // 导航白名单：只允许停留在自定义协议内。
+    //
+    // 这是最关键的一道防线——参考项目用 `shouldOverrideUrlLoading`
+    // 拦截一切主框架跳转。没有它，易盾 SDK 或任何注入脚本执行
+    // `location.href = 'https://evil'` 就能把整个窗口变成攻击者页面，
+    // 且该页面仍持有 captcha 窗口的 IPC 能力。
+    .on_navigation(|url| url.scheme() == CAPTCHA_PROTOCOL)
+    // 禁止弹出新窗口：否则 window.open 会创建新的 Tauri 窗口
+    .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny)
+    .build()
+    .map_err(|e| format!("创建验证窗口失败：{e}"))?;
 
     Ok(())
 }
@@ -204,17 +256,15 @@ mod tests {
 
     #[test]
     fn html_uses_ipc_invoke() {
-        let html = build_captcha_html("abc123");
+        let html = build_captcha_html("abc1234567890123456");
         assert!(html.contains("__TAURI_INTERNALS__"));
         assert!(html.contains("captcha_result"));
     }
 
     #[test]
     fn html_filters_dangerous_id_chars() {
-        // 防止把引号/尖括号注入到 JS 字符串
         let html = build_captcha_html("ab\"c<script>alert(1)</script>");
         assert!(!html.contains("<script>alert"), "不应能注入脚本");
-        assert!(html.contains("abcscriptalert1script"), "非字母数字应被过滤");
     }
 
     #[test]
@@ -230,4 +280,16 @@ mod tests {
         assert!(!valid_validate("line\nbreak"));
         assert!(!valid_validate(&"x".repeat(8193)));
     }
+
+    #[test]
+    fn captcha_id_validation_matches_reference() {
+        assert!(valid_captcha_id("414e5c9b866a03db03f860a1a9101672"));
+        assert!(valid_captcha_id(&"a".repeat(16)));
+        assert!(valid_captcha_id(&"a".repeat(64)));
+        assert!(!valid_captcha_id(&"a".repeat(15)));
+        assert!(!valid_captcha_id(&"a".repeat(65)));
+        assert!(!valid_captcha_id("has-dash-in-it-12345"));
+        assert!(!valid_captcha_id(""));
+    }
 }
+

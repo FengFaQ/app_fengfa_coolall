@@ -143,14 +143,28 @@ pub async fn close_captcha_window(app: tauri::AppHandle) -> Result<(), String> {
 /// 验证页面回传 validate 的入口。
 ///
 /// 由验证窗口里的 JS 通过 `__TAURI_INTERNALS__.invoke` 调用。
-/// 这里只校验格式并缓存，真正的重放由 [`complete_captcha`] 触发——
-/// 让用户能确认「窗口显示验证通过」后再落定，避免误提交。
+///
+/// # 为什么要校验调用窗口
+///
+/// 不校验的话，任何能访问 IPC 的页面（主窗口将来若被 XSS）
+/// 都能伪造：
+///
+/// ```js
+/// invoke('captcha_result', { validate: 'attacker-controlled', ... })
+/// ```
+///
+/// 参考项目用 `addWebMessageListener` 同时限制了来源 origin 与 isMainFrame，
+/// 这里用窗口 label 做等价约束——只有 label 为 `captcha` 的窗口能调。
 #[tauri::command]
 pub async fn captcha_result(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     validate: String,
     message: String,
 ) -> Result<(), String> {
+    if window.label() != crate::captcha_window::CAPTCHA_WINDOW_LABEL {
+        return Err("captcha_result 只能由验证窗口调用".into());
+    }
     if !crate::captcha_window::valid_validate(&validate) {
         return Err(format!("验证结果格式不正确：{message}"));
     }

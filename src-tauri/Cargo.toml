@@ -23,6 +23,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-log = "2"
+# 日志宏（tauri-plugin-log 依赖它，但宏要显式引入）
+log = "0.4"
 tauri-plugin-store = "2"
 
 # 协议核心：签名、设备身份、请求头、错误分类（不含 GUI 依赖）
@@ -53,6 +55,7 @@ custom-protocol = ["tauri/custom-protocol"]
 
 # 注意：release profile 必须写在 workspace 根（见 ../../Cargo.toml），
 # 写在这里会被 cargo 忽略并发出警告。
+
 
 
 
