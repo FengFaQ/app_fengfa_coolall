@@ -135,63 +135,108 @@ pub struct CaptchaChallenge { pub id: String, pub field: String }
 | `browse(target, page)` | 首页 / 动态列表 |
 | `search(keyword, page)` | 搜索 |
 | `replies(id, page)` | 评论列表 |
-| `detail(id)` | 详情，CAPTCHA/AUTH 失败时降级公开页 |
+| `detail(id)` | 详情；CAPTCHA/AUTH 失败且**显式允许**时才降级公开页 |
 | `session_info()` | 当前身份与待完成挑战 |
-| `submit_validation(...)` | 写入验证凭证（`lock().await`，不丢弃） |
+| `submit_validation(...)` | **写入凭证并立刻重放原请求**，返回重放结果 |
+| `retry_after_validation(pending)` | 带凭证重放一次；成功保留凭证，失败清除 |
+| `set_public_fallback(allow)` | 开关公开页兜底，默认 `false` |
 | `import_shuzlm_id(text)` | 手动导入数盟 ID |
 
-#### `lib.rs`
+#### `commands.rs` —— Tauri 命令层
 
-7 个 `#[tauri::command]`，全部 `async`，统一返回
-`Result<InvokeResult<T>, String>`（`session_info` 已统一包装）。
+**为什么要单独一个文件**：`#[tauri::command]` 会在模块级宏命名空间生成
+`__cmd__{name}` 与 `__tauri_command_name_{name}`。当这些命令直接定义在
+`lib.rs` 里、而 `lib.rs` 又同时被 `main.rs` 引用时，宏展开会产生
+`E0255: defined multiple times`。
+
+> 曾误判为 `crate-type` 多类型导致，**实测证伪**——恢复
+> `staticlib/cdylib/rlib` 三种类型后编译照样通过。真正的变量是命令定义位置。
+
+8 个命令，全部 `async`，统一返回 `Result<InvokeResult<T>, String>`：
+
+```
+browse / detail / replies / search
+session_info / submit_validation / import_shuzlm_id / set_public_fallback
+```
 
 `AppState` 使用 `tokio::sync::Mutex` —— **这是刻意的**：
 命令处理里需要在持锁期间 `.await` 网络请求，`std::sync::MutexGuard` 不满足 `Send`。
 
 ---
 
-## 4. Seam 现状（诚实版）
+## 4. 验证码链路（当前实现）
 
-上一版文档声称存在 4 个 seam，但**代码里一个都不存在**。这是文档先行的错误，现已更正。
+```
+① 任意请求 → 服务端返回 status 1004 / err_request_captcha_v2
+② classify() 映射为 Error::CaptchaNeeded { challenge }
+③ track_challenge() 记录 PendingCaptcha
+   { id, field, original_url }        ← 必须存完整 URL 才能重放
+④ 前端 ErrorBox 检测 needsCaptcha → 渲染 CaptchaBox
+⑤ 用户完成验证，粘贴 validate
+⑥ submit_validation(挑战ID, 字段, validate)
+   ├─ 校验 challenge_id 是否匹配当前待办（防旧窗口污染）
+   ├─ challenge.proof() 拼 NEC:{id前8位}:{validate} 并 URL 编码
+   ├─ 写入 Session.validation
+   └─ 立刻调用 retry_after_validation()
+⑦ 重放（ReplayGuard 保证只一次）
+   ├─ field 为空 → 当作 validate Cookie
+   └─ field 非空 → 拼成查询参数
+⑧ 成功 → 返回响应体，前端直接渲染（不再重复请求）
+   失败 → 清除凭证
+```
+
+**关键约束**：
+
+1. 每个验证流程**只重放一次**
+2. 重放后的 1004 **不再**触发第二次交互
+3. 传输错误不自动重放，但必须清掉本次凭证
+4. `validation` 凭证只在内存，**不落盘**
+5. 公开页降级是**显式**的，默认关闭
+
+---
+
+## 5. Seam 现状（诚实版）
 
 | 声称的 seam | 实际状态 |
 | --- | --- |
 | `HttpTransport` trait | ❌ 不存在，`client.rs` 直接用 `reqwest::Client` |
 | `SessionStore` trait | ❌ 不存在，`Session` 是具体结构体 + 文件持久化 |
 | `DeviceProfileSource` trait | ❌ 不存在，`DeviceProfile` 直接构造 |
-| `CaptchaFlow` trait | ❌ **不存在，而且这是当前最大的功能缺口** |
+| `CaptchaFlow` trait | ❌ 不存在，当前用「粘贴 validate」代替 WebView 自动回传 |
 
-**判断依据**（codebase-design 技能）：一个 adapter 是假想 seam，两个 adapter 才是真 seam。
-目前每个点只有一种实现，所以不预留接口是正确的——但代价是**无法用 Mock 测试 `client.rs`**。
+**代价**：`CoolapkClient::new()` 需要 `tauri::AppHandle`，测试无法构造真实实例，
+只能用 `test_client()` 手搓字段，因此**测不了完整的 1004→验证→重放链路**。
 
-验证码链路落地时，必然需要至少两个 adapter（真实 WebView / 测试替身），
-届时 `CaptchaFlow` 才会成为真 seam。
+**下一步**：引入 `HttpTransport` seam（生产 `ReqwestTransport`，测试 `MockTransport`），
+让上述链路可被集成测试覆盖。两个 adapter 才是真 seam。
 
 ---
 
-## 5. 测试策略（现状）
+## 6. 测试策略（现状）
 
 | 层 | 方式 | 数量 |
 | --- | --- | --- |
-| 核心 crate | `cargo test`，纯单元测试 | 41 项 |
-| 前端 | `vitest`，纯函数测试 | 8 项 |
-| `client.rs` | ❌ **无覆盖** | 0 |
+| `coolall-core` | `cargo test`，纯单元测试 | 47 项 |
+| `client.rs` | `cargo test --lib`，状态逻辑 | 9 项 |
+| 前端纯函数 | `vitest` | 29 项（含 16 项 sanitizer 对抗测试） |
+| 验证码重放链路 | ❌ **无集成测试**（缺 MockTransport） | 0 |
 | 端到端 | ❌ 无 | 0 |
 
-**已知短板**：41 项测试集中在纯函数，**最关键的 1004 主流程没有任何自动化覆盖**。
-补 MockTransport 集成测试是下一步重点。
+**已知短板**：最有价值的「1004 → 验证 → 重放 → 成功」链路没有自动化覆盖。
+单元测试只能证明各部件正确，不能证明它们被正确串起来——
+上一轮就出现过「重放函数写好了但没有任何调用方」的假完成状态，正是这个短板导致的。
 
 ---
 
-## 6. 已知功能缺口
+## 7. 已知功能缺口
 
 按严重程度排列：
 
-1. **验证码重放链路缺失** —— 游客态请求稳定返回 `status: 1004`，
-   目前只实现了「存下 validate」，重放 / 单次限制 / 失败清理 / 验证窗口 UI 全无。
-   这是应用能否真正使用的唯一主通路。
-2. **无登录命令** —— `is_logged_in()` 恒为假。
+1. **验证码获取方式未经验证** —— 当前用「打开网页 → 用户粘贴 validate」的方式，
+   未经真实服务端验证。若行不通，需改为内嵌 WebView 自动回传。
+2. **无登录命令** —— `is_logged_in()` 恒为假，登录明确延后到阶段 2。
 3. **全局锁串行** —— 单锁包住整个 client，20 秒超时会拖住所有其他命令。
+   阶段 1 暂保留（它顺带消除了几处并发竞态），阶段 2 拆分。
 4. **无请求取消** —— 仅靠前端请求序号丢弃过期结果，Rust 侧请求仍会跑完。
 
 ---

@@ -170,3 +170,51 @@ CI 连续三轮在 Windows 打包失败，根因是 `#[tauri::command]` 的 `__c
 3. 按你的判断决定是否下沉 executor
 
 请给出：executor 下沉的裁决 + 上面 6 个未修 P1 里哪些必须在阶段 1 内修。
+
+## 更新（第四次同步，2026-10-31 21:54）
+
+### 对你第三轮意见的处理
+
+**核心裁决「保留折中、不要整体下沉」——已采纳。**
+
+你指出的假完成状态属实，我已核实并修复：
+
+```
+retry_after_validation 的调用方：修复前只有定义，0 个调用
+```
+
+**修法**：`submit_validation` 改为 `&mut self`，写凭证后**立刻调用重放**，
+返回重放得到的响应体。前端 `CaptchaBox` 新增 `resolved` 事件，
+`FeedDetailPage` 收到后直接渲染，不再重复请求（重复请求会白白消耗重放机会）。
+
+| 你的建议 | 处理 |
+| --- | --- |
+| 把重放接入真实命令链路 | ✅ 已修，`submit_validation` 一步完成写凭证+重放+返回 |
+| 引入 HttpTransport seam | ⏸ 未做，见下方问题 |
+| client.rs 补 4 组 MockTransport 测试 | ⚠️ 部分：补了 6 项状态测试，但**没有 MockTransport** |
+| sanitizer 对抗测试（阶段 1 必修） | ✅ 已补 16 项 |
+| 落盘失败加日志 | ⏸ 未做 |
+| 更新架构文档 | ⏸ 待更新 |
+
+### 我现在遇到的实际困难
+
+你建议「在 client.rs 内引入很小的 HttpTransport seam，生产用 reqwest、测试用 MockTransport」。
+
+问题是：`CoolapkClient::new()` 需要 `tauri::AppHandle`，我在测试里绕不过去，
+只能手搓一个 `test_client()` 直接构造字段。这能测纯状态，但**测不了完整的 1004→验证→重放链路**，
+因为那必然要发 HTTP。
+
+**请你给出具体的落地方式**：
+- HttpTransport trait 应该长什么样？签名要包含哪些参数（method / url / headers / body）？
+- 响应类型怎么定义？我需要拿到 status、set-cookie、json body
+- `CoolapkClient` 的字段要怎么改？现在是 `http: reqwest::Client`
+- 最小改动是多少行？我不想为此重写整个 client.rs
+
+给到能直接抄进代码的程度最好。
+
+### 另外
+
+CI 现在正在跑（run 41207561567）。上一轮已经越过编译阶段，
+这次要看是否走到 NSIS 打包并真的产出 exe。
+
+如果打包成功，你建议的下一步「Windows 实机验收 ≤> 1004 → 完成验证 → 原请求成功」我就能做了。

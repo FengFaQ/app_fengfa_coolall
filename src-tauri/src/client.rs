@@ -1,4 +1,4 @@
-//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
+﻿//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
 //!
 //! 调用者不需要知道 TokenV3、设备编码、Cookie 维护的任何细节。
 //! 设计依据见 `docs/ARCHITECTURE.md`。
@@ -114,14 +114,23 @@ impl CoolapkClient {
     fn persist(&self) {
         let Some(path) = &self.store_path else { return };
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                // 只记路径与错误类型，不记文件内容
+                eprintln!("[coolall] 创建配置目录失败 dir={dir:?} err={e}");
+                return;
+            }
         }
         let cfg = PersistedConfig {
             szlm_id: self.identity.szlm_id.clone(),
             profile: self.identity.profile.clone(),
         };
-        if let Ok(text) = serde_json::to_string_pretty(&cfg) {
-            let _ = std::fs::write(path, text);
+        match serde_json::to_string_pretty(&cfg) {
+            Ok(text) => {
+                if let Err(e) = std::fs::write(&path, text) {
+                    eprintln!("[coolall] 写入身份配置失败 path={path:?} err={e}");
+                }
+            }
+            Err(e) => eprintln!("[coolall] 序列化身份配置失败 err={e}"),
         }
     }
 
@@ -141,7 +150,10 @@ impl CoolapkClient {
             return;
         };
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("[coolall] 创建会话目录失败 dir={dir:?} err={e}");
+                return;
+            }
         }
         let snapshot = {
             let g = self.session.lock().await;
@@ -153,8 +165,13 @@ impl CoolapkClient {
                 token: g.token.clone(),
             }
         };
-        if let Ok(text) = serde_json::to_string_pretty(&snapshot) {
-            let _ = std::fs::write(path, text);
+        match serde_json::to_string_pretty(&snapshot) {
+            Ok(text) => {
+                if let Err(e) = std::fs::write(&path, text) {
+                    eprintln!("[coolall] 写入会话文件失败 path={path:?} err={e}");
+                }
+            }
+            Err(e) => eprintln!("[coolall] 序列化会话失败 err={e}"),
         }
     }
 
@@ -635,4 +652,5 @@ mod tests {
         assert_eq!(BrowseTarget::parse("nope"), None);
     }
 }
+
 
