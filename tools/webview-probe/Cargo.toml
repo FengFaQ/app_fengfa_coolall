@@ -1,0 +1,20 @@
+[package]
+name = "webview-probe"
+version = "0.1.0"
+edition = "2021"
+
+# 独立 workspace，避免与主项目冲突
+[workspace]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+coolall-core = { path = "../../crates/coolall-core" }
+base64 = "0.22"
+url = "2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
