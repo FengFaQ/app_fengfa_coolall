@@ -1,4 +1,4 @@
-//! coolall 协议核心。
+﻿//! coolall 协议核心。
 //!
 //! 这个 crate **不依赖 tauri / GUI**，可以独立编译与测试。
 //! 设计目的：把协议逻辑与桌面外壳解耦，使得：
@@ -12,7 +12,9 @@ pub mod captcha;
 pub mod device;
 pub mod error;
 pub mod request;
+pub mod shuzilm;
 pub mod token_v3;
 
 pub use error::Error;
 pub use token_v3::TokenError;
+
