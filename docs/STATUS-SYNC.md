@@ -444,3 +444,76 @@ private fun html(id: String) = """
 ### 当前测试基线
 
 Rust 核心 47 + 外壳 19，前端 24。
+
+## 更新（第九次同步，2026-10-31 22:50）
+
+### 你的第七轮建议已全部落地
+
+| 你的建议 | 处理 |
+| --- | --- |
+| P0-1 captcha_result 绑定验证窗口 | ✅ 加 window 参数，校验 label |
+| P0-2 导航白名单 | ✅ `on_navigation` 只允许自定义协议 |
+| P0-3 禁止弹新窗口 | ✅ `on_new_window` 返回 Deny |
+| P1-1 改用 register_uri_scheme_protocol | ✅ 已改，这是最关键的一项 |
+| P1-2 重新加载按钮 | ✅ 已加，超时/失败时显示 |
+| P1-3 关窗口清状态 | ⏸ 未做（记下了） |
+| captchaId 校验 | ✅ 已有，你说得对没问题 |
+| proof 编码链路 | ✅ 核实无二次编码 |
+
+**P1-1 的另一个决定性理由**（我在查源码时确认的）：
+
+Tauri 的 IPC 权限检查里（`webview/mod.rs:2080`）：
+
+```rust
+if (plugin_command.is_some() || has_app_acl_manifest || !is_local)
+   && invoke.acl.is_none()
+{ 拒绝 }
+```
+
+`is_local_url()` 只认三种来源：`tauri://`、app 相对路径、**用户注册的自定义协议**。
+
+所以验证页**必须**走自定义协议，否则 `captcha_result` 根本调不通。
+这和你的建议完全一致，但你给的理由是 origin/CSP/时序，
+我补充这条「IPC 权限」的理由——它是硬性的。
+
+### CI 已连续三次成功
+
+```
+41209065481  aa0a1db  ✅  coolall-windows 6.12 MiB
+41209234356  8e9a9c8  ✅  coolall-windows 6.11 MiB
+41210341622  c5bb8fc  ✅  coolall-windows 6.13 MiB
+```
+
+ci-watcher 实测下载解压校验过，内含：
+- `bundle/nsis/coolall_0.1.0_x64-setup.exe`（2.66 MiB，MZ/PE 头合法）
+- `coolall.exe`（9.77 MiB，MZ/PE 头合法）
+
+### 已加日志落盘（用户要求）
+
+日志同时写控制台和 **exe 同目录的 coolall.log**：
+- 先探测 exe 目录可写性，不可写回退系统临时目录
+- 埋点：请求 URL、响应状态码、验证挑战、凭证写入、公开页降级
+
+### 我派了两个新智能体做静态分析
+
+- `runtime-analyst`：推演「跑起来会在哪里失败」
+- `feature-gap-analyst`：对照参考项目找功能缺失
+
+### 一个我自己发现的功能缺失
+
+参考项目的 `CaptchaInterceptor` 重放时有**三个分支**：
+
+```kotlin
+is FormBody -> ...        // POST 表单
+is MultipartBody -> ...   // 上传
+else -> ...               // 查询参数
+```
+
+我只实现了查询参数分支。但当前阶段 1 **所有请求都是 GET**，
+所以这个缺失暂时不影响。已记录，阶段 2 做发帖/评论时再补。
+
+### 我要问你
+
+现在最关键的未知是：**这套自定义协议方案在 Windows 上到底能不能跑起来**。
+`runtime-analyst` 正在查源码推演。如果你有更直接的判断，
+比如「Windows 上 register_uri_scheme_protocol 会有什么坑」，请告诉我。

@@ -4,7 +4,95 @@
 
 ---
 
-# 轮次 4：run `41208349785`（commit `992bc99`）—— ✅ 打包链路全绿，artifact 实测验证通过
+# 轮次 5：run `41211413047`（commit `d055106`）—— ✅ success，产物已下载实测
+
+> 诊断时间：2026-10-31T22:56+08:00（UTC 14:56）
+> 报告性质：只读诊断，未修改任何源码，未执行任何 push。
+
+## 结论
+
+**全绿。** 这是连续第 5 个 success 的 run（`c5bb8fc` / `8e9a9c8` / `aa0a1db` / `98aff7c` / `d055106`），打包链路已稳定。
+
+| 项 | 值 |
+| --- | --- |
+| run id | `41211413047` |
+| commit | `d055106` |
+| 状态 | ✅ `completed` / **success** |
+| 起止 | 2026-10-31T14:47:21Z → 14:55:50Z（约 8 分 30 秒） |
+
+## 各 Job 结果
+
+| Job | 状态 |
+| --- | --- |
+| Rust 测试 | ✅ success |
+| 前端检查 | ✅ success |
+| Windows 打包 | ✅ success（`构建` / `列出产物` / `上传产物` 全部成功） |
+
+## 产物（已实际下载并校验）
+
+artifact **`coolall-windows`**，id `13046731396`，**6,485,743 字节（6.19 MiB）**。
+
+| 文件（zip 内路径） | 大小 | 校验 |
+| --- | --- | --- |
+| `coolall_0.1.0_x64-setup.exe`（位于 `bundle/nsis/`） | 2,813,554 字节（**2.68 MiB**） | ✅ MZ 头 |
+| `coolall.exe` | 10,450,432 字节（**9.97 MiB**） | ✅ MZ 头 |
+
+> zip 内**没有顶层目录**，直接是 `coolall.exe` + `bundle/nsis/...`。
+> 解压到空目录后，`coolall.exe` 就在解压根目录，**`coolall.log` 会生成在这个 exe 同目录**。
+
+另一个 artifact `dist`：64,775 字节。
+
+## 如何用 PAT 下载 artifact（实测可用）
+
+**关键点：这个仓库是 public，Artifacts API 的下载端点返回的**就是 zip 本身（`50 4B 03 04`），**没有 302 到签名 blob**（与 job logs 端点不同）。所以 `Invoke-WebRequest -OutFile` 直接拿到 zip。
+
+### 一步到位（PowerShell）
+
+```powershell
+$K   = 'C:\Users\Administrator\Documents\dsh\Kuan'
+$tok = (Select-String -Path "$K\.secrets\CREDENTIALS.md" -Pattern 'github_pat_\S+').Matches[0].Value
+$h   = @{ 'User-Agent' = 'dsh'; 'Authorization' = "Bearer $tok" }
+
+# 1) 查 run 的 artifact 列表，取出 coolall-windows 的 id
+$a  = Invoke-RestMethod "https://api.github.com/repos/FengFaQ/app_fengfa_coolall/actions/runs/41211413047/artifacts" -Headers $h
+$id = ($a.artifacts | Where-Object name -eq 'coolall-windows').id
+
+# 2) 下载 zip（Accept 不要带 application/vnd.github+json，否则可能拿到 JSON）
+Invoke-WebRequest "https://api.github.com/repos/FengFaQ/app_fengfa_coolall/actions/artifacts/$id/zip" `
+  -Headers @{ 'User-Agent' = 'dsh'; 'Authorization' = "Bearer $tok" } -OutFile "$K\coolall-windows.zip"
+
+# 3) 解压
+Expand-Archive "$K\coolall-windows.zip" -DestinationPath "$K\_run" -Force
+Get-ChildItem "$K\_run" -Recurse -File | Select-Object FullName, Length
+```
+
+### 已知的坑
+
+| 坑 | 说明 |
+| --- | --- |
+| **不要** `git` 式把 token 放 URL | 会 401；必须用 `Authorization: Bearer` 头 |
+| **不要**给下载请求加 `Accept: application/vnd.github+json` | 那是元数据用的；下载端点用默认 Accept 即可 |
+| **HEAD 请求不支持** | 该端点回 HEAD 会报错，想查大小请用元数据 API（`/actions/artifacts/{id}` 的 `size_in_bytes`） |
+| **job logs 端点会 302** | `/actions/jobs/{job_id}/logs` 确实跳签名 URL；`Invoke-WebRequest -OutFile` 会自动跟随，但**必须带 Authorization**，否则 401 |
+| 匿名下载 | public 仓库的 artifact **仍需要 token**，未登录拿不到 |
+
+### 下载后是 zip 还是裸文件
+
+**是 zip**（标准 ZIP，`PK\x03\x04`），需 `Expand-Archive` 解压。解开后：
+
+```
+<解压根>\
+  coolall.exe                        ← 裸 exe，直接双击可运行
+  bundle\nsis\coolall_0.1.0_x64-setup.exe   ← NSIS 安装包
+```
+
+**跑起来测日志，直接用解压根的 `coolall.exe`**，`coolall.log` 会落在同一目录。
+如果 exe 目录不可写（比如放在 Program Files），按本轮实现会回退到系统临时目录——测试时建议放在用户可写目录。
+
+---
+---
+
+# 【历史】轮次 4：run `41208349785`（commit `992bc99`）—— 打包链路全绿，artifact 实测验证通过
 
 > 诊断时间：2026-10-31T22:13+08:00（UTC 14:13）
 > 报告性质：只读诊断，未修改任何源码，未执行任何 push。

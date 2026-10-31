@@ -1,4 +1,4 @@
-﻿//! 验证码窗口：自建本地页面加载网易易盾 SDK，通过 Tauri IPC 回传 validate。
+//! 验证码窗口：自建本地页面加载网易易盾 SDK，通过 Tauri IPC 回传 validate。
 //!
 //! # 真实机制（从参考项目 c001apk 的 CaptchaActivity.kt 核实）
 //!
@@ -115,16 +115,36 @@ pub fn build_captcha_html(captcha_id: &str) -> String {
   document.getElementById('reload').onclick = function () { location.reload(); };
 
   function report(validate) {
+    // 注意：invoke 返回 Promise，同步 try/catch 抓不到异步失败。
+    // 必须用 .then/.catch，否则回传失败时页面仍显示「验证通过」，
+    // 用户会以为是应用卡了。
     try {
-      window.__TAURI_INTERNALS__.invoke('captcha_result', {
+      var p = window.__TAURI_INTERNALS__.invoke('captcha_result', {
         validate: validate,
         message: 'ok'
       });
-      statusText('验证通过，请回到主窗口点「我已完成验证」');
+      if (p && typeof p.then === 'function') {
+        p.then(function () {
+          statusText('验证通过，请回到主窗口点「我已完成验证」');
+        }).catch(function (e) {
+          statusText('回传失败：' + e);
+          showReload();
+        });
+      } else {
+        statusText('验证通过，请回到主窗口点「我已完成验证」');
+      }
     } catch (e) {
       statusText('回传失败：' + e);
+      showReload();
     }
   }
+
+  // 监听 CSP 拦截事件，让静默失败可见（排查用）
+  document.addEventListener('securitypolicyviolation', function (e) {
+    statusText('资源被安全策略拦截：' + (e.violatedDirective || '') +
+               ' ' + (e.blockedURI || ''));
+    showReload();
+  });
 
   if (!CAPTCHA_ID) {
     statusText('缺少验证标识，请关闭窗口后重试');
@@ -204,9 +224,13 @@ pub fn open_window<R: tauri::Runtime>(
         let _ = old.close();
     }
 
-    // captchaId 通过查询参数传给协议处理器，
-    // 这样 HTML 是静态的，不依赖「导航后立即 eval」的时序
-    let url = format!("{CAPTCHA_PROTOCOL}://localhost/?captchaId={captcha_id}");
+    // captchaId 编码进**路径**而不是查询参数。
+    //
+    // 原因：页面上的「重新加载」按钮走 location.reload()，
+    // 它不会保留 query，但会保留路径。如果 id 只在 query 里，
+    // 重载后 handler 拿到空 id，页面显示「缺少验证标识」——
+    // 而这是唯一的自救路径，一旦失败链路就彻底锁死。
+    let url = format!("{CAPTCHA_PROTOCOL}://localhost/c/{captcha_id}");
 
     WebviewWindowBuilder::new(
         app,
@@ -219,13 +243,34 @@ pub fn open_window<R: tauri::Runtime>(
     .inner_size(420.0, 560.0)
     .min_inner_size(360.0, 480.0)
     .center()
-    // 导航白名单：只允许停留在自定义协议内。
+    // 导航白名单：只允许停留在验证页自身。
     //
-    // 这是最关键的一道防线——参考项目用 `shouldOverrideUrlLoading`
-    // 拦截一切主框架跳转。没有它，易盾 SDK 或任何注入脚本执行
-    // `location.href = 'https://evil'` 就能把整个窗口变成攻击者页面，
-    // 且该页面仍持有 captcha 窗口的 IPC 能力。
-    .on_navigation(|url| url.scheme() == CAPTCHA_PROTOCOL)
+    // # Windows 上的关键陷阱
+    //
+    // wry 会把自定义协议 URL 改写成 http：
+    //   coolall-captcha://localhost/  →  http://coolall-captcha.localhost/
+    // （见 wry-0.57.1/src/custom_protocol_workaround.rs:21-27）
+    //
+    // 而 `on_navigation` 收到的是**改写后的 http URL**，
+    // 所以写 `url.scheme() == CAPTCHA_PROTOCOL` 会永远为假，
+    // 连首屏都会被拒——这是必须分平台处理的原因。
+    //
+    // 判定逻辑与 Tauri 自身的 is_local_url 保持一致
+    // （tauri-2.12.5/src/webview/mod.rs:1986-1998）。
+    .on_navigation(|url| {
+        #[cfg(any(windows, target_os = "android"))]
+        {
+            let scheme_ok = url.scheme() == "http" || url.scheme() == "https";
+            let host = url.domain().unwrap_or("");
+            return scheme_ok && host == "coolall-captcha.localhost";
+        }
+
+        #[cfg(not(any(windows, target_os = "android")))]
+        {
+            let _ = url;
+            url.scheme() == CAPTCHA_PROTOCOL && url.domain() == Some("localhost")
+        }
+    })
     // 禁止弹出新窗口：否则 window.open 会创建新的 Tauri 窗口
     .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny)
     .build()

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "captcha-window",
-  "description": "验证窗口加载的是本地构造页面 + 远程易盾脚本。它唯一需要的能力是把 validate 回传给 Rust（captcha_result 命令）。刻意最小化授权：不给文件系统、不给对话框、不给 store，避免远程脚本获得任何本机能力。",
+  "description": "验证窗口加载本地构造页面 + 远程易盾脚本。它唯一需要的能力是把 validate 回传给 Rust（captcha_result 命令）。刻意最小化授权：不给文件系统、不给对话框、不给 store，避免远程脚本获得本机能力。",
   "windows": ["captcha"],
   "permissions": ["core:default"]
 }

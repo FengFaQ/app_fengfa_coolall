@@ -1,4 +1,4 @@
-﻿//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
+//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
 //!
 //! 调用者不需要知道 TokenV3、设备编码、Cookie 维护的任何细节。
 //! 设计依据见 `docs/ARCHITECTURE.md`。
@@ -266,12 +266,12 @@ impl CoolapkClient {
         map
     }
 
-    /// 用户完成验证后，用凭证重放一次原请求。
+    /// Cookie 模式重放：凭证已在会话里，走标准 send 会自动带上。
     ///
-    /// 规则见 PROTOCOL.md §9.4：
-    /// - 只重放一次
-    /// - 成功 → 保留凭证
-    /// - 失败 → 清除凭证
+    /// 字段模式请用 [`replay_with_proof`]，它把 proof 直接拼进 URL，
+    /// 不写会话。两条路径分开是为了避免「查询参数凭证被误当 Cookie 复用」。
+    ///
+    /// 规则见 PROTOCOL.md §9.4：只重放一次；成功保留凭证，失败清除。
     pub async fn retry_after_validation(
         &mut self,
         pending: &PendingCaptcha,
@@ -285,7 +285,13 @@ impl CoolapkClient {
         self.replay_guard.consume();
 
         match pending.placement() {
+            ProofPlacement::Cookie => {
+                let (base, path) = split_url(&pending.original_url);
+                self.finish_response_send(base, path).await
+            }
             ProofPlacement::QueryParam => {
+                // 理论上不会走到这里（submit_validation 已分流），
+                // 但保留兜底：取出会话里的凭证再拼一次。
                 let proof = {
                     let g = self.session.lock().await;
                     g.validation.clone()
@@ -302,13 +308,7 @@ impl CoolapkClient {
                     .map_err(|error| Error::Network {
                         message: error.message,
                     })?;
-                // 走统一处理，保证 QueryParam 模式也会回写 Set-Cookie
                 self.finish_response(response).await
-            }
-            ProofPlacement::Cookie => {
-                // Cookie 模式：走标准 send，会自动带上 session 里的 validate
-                let (base, path) = split_url(&pending.original_url);
-                self.finish_response_send(base, path).await
             }
         }
     }
@@ -436,6 +436,10 @@ impl CoolapkClient {
     }
 
     /// 记录挑战，供后续重放使用。
+    ///
+    /// 每次遇到新挑战都重置重放守卫——否则重放被拒后，
+    /// 同一个挑战再也无法重试，用户只能重启应用。
+    /// 参考项目靠 CaptchaCoordinator 的 epoch 机制达到同样效果。
     fn track_challenge(&mut self, result: &Result<Value, Error>, base: &str, path: &str) {
         if let Err(Error::CaptchaNeeded { challenge }) = result {
             log::info!("    需要人机验证 id={} field={}", challenge.id, challenge.field);
@@ -472,31 +476,91 @@ impl CoolapkClient {
         challenge_id: &str,
         field: &str,
         validate: &str,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, Error> {
         let Some(pending) = self.pending_captcha.clone() else {
-            return Err("当前没有待完成的验证".into());
+            return Err(Error::Business {
+                status: 1004,
+                message: "当前没有待完成的验证".into(),
+            });
         };
         if !pending.matches(challenge_id) {
-            return Err("验证标识不匹配，请重新发起请求".into());
+            return Err(Error::Business {
+                status: 1004,
+                message: "验证标识不匹配，请重新发起请求".into(),
+            });
         }
         let challenge = coolall_core::error::CaptchaChallenge {
             id: challenge_id.to_string(),
             field: field.to_string(),
         };
         let Some(proof) = challenge.proof(validate) else {
-            return Err("验证结果格式不正确".into());
+            return Err(Error::Business {
+                status: 1004,
+                message: "验证结果格式不正确".into(),
+            });
         };
-        {
-            let mut guard = self.session.lock().await;
-            guard.accept_validation(proof);
-        }
-        log::info!("    验证凭证已写入，开始重放");
 
-        // 写凭证后立刻重放，把最初失败的请求补上
-        match self.retry_after_validation(&pending).await {
-            Ok(v) => Ok(v),
-            Err(e) => Err(format!("{e}")),
+        // 凭证的落点由 Challenge 决定，不是一律写进会话。
+        //
+        // 对齐参考项目 CaptchaInterceptor.kt:
+        // - field 为空（Cookie 模式）→ 写入会话，后续请求自动携带
+        // - field 非空（查询参数/表单）→ 只用于本次重放，不写会话
+        //
+        // 早期实现无条件写会话，导致查询参数模式下凭证被误当成
+        // 长期 Cookie 使用，而服务端并不认，表现为「验一次管不了一片」。
+        let cookie_mode = pending.placement() == ProofPlacement::Cookie;
+        if cookie_mode {
+            let mut guard = self.session.lock().await;
+            guard.accept_validation(proof.clone());
+            log::info!("    验证凭证已写入会话（Cookie 模式），开始重放");
+        } else {
+            log::info!("    验证凭证仅用于本次重放（字段模式），开始重放");
         }
+
+        // 走一次性重放路径：字段模式下需要把 proof 直接带进 URL
+        let result = if cookie_mode {
+            self.retry_after_validation(&pending).await
+        } else {
+            self.replay_with_proof(&pending, &proof).await
+        };
+
+        match result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                // 重放失败：清除可能写入的凭证
+                let mut guard = self.session.lock().await;
+                guard.clear_validation();
+                Err(e)
+            }
+        }
+    }
+
+    /// 字段模式重放：proof 只拼进本次请求的 URL，不进会话。
+    async fn replay_with_proof(
+        &mut self,
+        pending: &PendingCaptcha,
+        proof: &str,
+    ) -> Result<Value, Error> {
+        if !self.replay_guard.may_replay() {
+            return Err(Error::Business {
+                status: 1004,
+                message: "本次验证已重放过一次，请重新发起请求".into(),
+            });
+        }
+        self.replay_guard.consume();
+
+        let url = pending.url_with_proof(proof);
+        let request = HttpRequest::get(url.clone(), self.headers_map().await);
+        log::info!("重放 {url}");
+
+        let response = self.http.execute(request).await.map_err(|error| {
+            log::warn!("重放失败 {url}：{}", error.message);
+            Error::Network {
+                message: error.message,
+            }
+        })?;
+
+        self.process_response(response).await
     }
 
     /// 测试构造入口：生产代码仍必须走 `new(AppHandle)`。
@@ -659,11 +723,15 @@ mod tests {
         );
         assert!(requests[1].url.contains("id=123&"));
 
-        // 成功重放后保留凭证
+        // 字段模式**不写会话**：凭证只活在这次重放的 URL 里。
+        //
+        // 这是 2026-10-31 的修正：早期无条件写会话，导致查询参数凭证
+        // 被误当成长期 Cookie 复用，而服务端并不认，
+        // 表现为「验一次管不了一片请求」。
         let session = client.session.lock().await;
         assert_eq!(
-            session.validation.as_deref(),
-            Some("NEC%3Aabcdef01%3Aproof")
+            session.validation, None,
+            "字段模式的凭证不应写入会话"
         );
         assert!(!client.replay_guard.may_replay());
     }
@@ -689,7 +757,7 @@ mod tests {
             .submit_validation(CHALLENGE_ID, "_v2_post_token", "bad-proof")
             .await
             .expect_err("重放仍被拒时必须返回错误");
-        assert!(error.contains("验证"), "实际错误：{error}");
+        assert!(error.to_string().contains("验证"), "实际错误：{error}");
 
         // 每个挑战只消费一次重放机会，不允许隐式第三次请求
         assert_eq!(mock.requests().len(), 2);
@@ -737,10 +805,14 @@ mod tests {
             "实际 Cookie：{cookie}"
         );
 
+        // Cookie 模式**应该**写会话：凭证作为 validate Cookie
+        // 对后续所有请求生效，这正是「验一次管一片」的基础。
+        // 与上一个测试（字段模式不写会话）形成对照。
         let session = client.session.lock().await;
         assert_eq!(
             session.validation.as_deref(),
-            Some("NEC%3Aabcdef01%3Acookie-proof")
+            Some("NEC%3Aabcdef01%3Acookie-proof"),
+            "Cookie 模式的凭证必须写入会话以便复用"
         );
     }
 
@@ -759,7 +831,7 @@ mod tests {
             .submit_validation("wrong-id", "_v2_post_token", "proof")
             .await
             .expect_err("挑战 ID 不匹配必须拒绝");
-        assert!(error.contains("不匹配"));
+        assert!(error.to_string().contains("不匹配"));
 
         assert_eq!(mock.requests().len(), 1, "拒绝时不应发新请求");
         let session = client.session.lock().await;
@@ -865,6 +937,7 @@ mod tests {
         assert_eq!(BrowseTarget::parse("nope"), None);
     }
 }
+
 
 
 

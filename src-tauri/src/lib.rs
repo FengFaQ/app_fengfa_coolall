@@ -120,35 +120,55 @@ pub fn run() {
         // 会拒绝远程来源调用命令（`webview/mod.rs:2080` 的 `!is_local` 分支），
         // 而 `is_local_url()` 只认 tauri:// 、app 相对路径、用户注册的自定义协议。
         //
-        // captchaId 通过 URL 查询参数传入，页面向它读取——
-        // 这样 HTML 是静态的，不依赖「导航后立即 eval」的时序。
+        // # 关于 captcha_result 的授权（重要，别被误导）
+        //
+        // `webview/mod.rs:2080` 的拦截条件是：
+        //   (plugin_command.is_some() || has_app_acl_manifest || !is_local) && acl.is_none()
+        //
+        // 本仓库**没有 `permissions/` 目录**，所以 `has_app_manifest()` 为假；
+        // 而自定义协议算本地来源，`!is_local` 也为假。
+        // 于是整个条件不成立，`captcha_result` 会被直接放行，**不需要**在
+        // capability 里声明。
+        //
+        // 反直觉之处：一旦在 `permissions/` 下建了任何权限文件，
+        // `has_app_acl_manifest` 就变成 true，届时**所有**应用命令
+        // 都必须显式授权，反而更容易配错。所以这里刻意不做权限声明。
+        //
+        // 命令侧仍用窗口 label 校验调用者（见 commands.rs::captcha_result），
+        // 那才是真正的安全边界。
+        //
+        // captchaId 从**路径**读取（`/c/<id>`），不是查询参数——
+        // 因为页面的 location.reload() 会丢 query 但保留路径。
         .register_uri_scheme_protocol(captcha_window::CAPTCHA_PROTOCOL, |ctx, request| {
             use tauri::http::Response;
 
-            // 从查询参数里取 captchaId
-            let captcha_id = request
-                .uri()
-                .query()
-                .and_then(|q| {
-                    q.split('&')
-                        .find_map(|kv| kv.strip_prefix("captchaId="))
-                })
-                .unwrap_or("");
+            let _ = ctx;
+            let path = request.uri().path();
+
+            // 期望形式：/c/<captchaId>
+            let captcha_id = path
+                .strip_prefix("/c/")
+                .unwrap_or("")
+                .trim_end_matches('/');
 
             let html = captcha_window::build_captcha_html(captcha_id);
-            let _ = ctx;
 
             Response::builder()
                 .header("Content-Type", "text/html; charset=utf-8")
-                // 只允许加载易盾脚本与连接易盾接口
+                // CSP 说明：
+                // - script-src 必须含 'unsafe-inline'（页面内联脚本）
+                //   与 'unsafe-eval'（易盾 SDK 内部用 new Function）
+                // - 易盾会从 getconf 返回的多个域名加载资源，逐个放行
                 .header(
                     "Content-Security-Policy",
                     "default-src 'none'; \
-                     script-src 'unsafe-inline' https://cstaticdun.126.net; \
-                     connect-src https://*.dun.163.com https://*.163yun.com https://cstaticdun.126.net; \
+                     script-src 'unsafe-inline' 'unsafe-eval' \
+                       https://cstaticdun.126.net https://*.dun.163.com https://*.163yun.com; \
+                     connect-src https://cstaticdun.126.net https://*.dun.163.com https://*.163yun.com; \
                      style-src 'unsafe-inline'; \
                      img-src data: https:; \
-                     frame-src https://*.dun.163.com; \
+                     font-src data: https:; \
+                     frame-src https://*.dun.163.com https://*.163yun.com; \
                      object-src 'none'; base-uri 'none'; form-action 'none'",
                 )
                 .body(html.into_bytes())

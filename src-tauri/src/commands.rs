@@ -93,12 +93,9 @@ pub async fn submit_validation(
         .await
     {
         Ok(data) => Ok(InvokeResult::success(data)),
-        Err(message) => Ok(InvokeResult::failure(
-            coolall_core::Error::Business {
-                status: 1004,
-                message,
-            },
-        )),
+        // 透传原始错误类型：前端要能区分「验证被拒」「登录失效」「网络错误」，
+        // 全都压成 1004 的话用户只会看到同一条提示，无法判断下一步该做什么。
+        Err(error) => Ok(InvokeResult::failure(error)),
     }
 }
 
@@ -184,10 +181,16 @@ pub async fn complete_captcha(
     let mut client = state.client.lock().await;
 
     let Some(pending) = client.pending_captcha().cloned() else {
-        return Err("当前没有待完成的验证".into());
+        return Ok(InvokeResult::failure(coolall_core::Error::Business {
+            status: 1004,
+            message: "当前没有待完成的验证".into(),
+        }));
     };
     let Some(validate) = client.take_staged_validate() else {
-        return Err("还没有收到验证结果，请先在验证窗口中完成验证".into());
+        return Ok(InvokeResult::failure(coolall_core::Error::Business {
+            status: 1004,
+            message: "还没有收到验证结果，请先在验证窗口中完成验证".into(),
+        }));
     };
 
     let result = client
@@ -199,10 +202,8 @@ pub async fn complete_captcha(
             crate::captcha_window::close_window(&app);
             Ok(InvokeResult::success(data))
         }
-        Err(message) => Ok(InvokeResult::failure(coolall_core::Error::Business {
-            status: 1004,
-            message,
-        })),
+        // 透传原始错误类型，理由同 submit_validation
+        Err(error) => Ok(InvokeResult::failure(error)),
     }
 }
 
