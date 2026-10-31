@@ -4,18 +4,25 @@ import { ApiError, type BackendError } from './index'
 /**
  * 人机验证。
  *
- * # 为什么用内嵌窗口而不是外部浏览器
+ * # 真实机制（从参考项目 c001apk 核实）
  *
- * 外部浏览器是独立进程，它的 Cookie 归浏览器管，应用读不到。
- * 用户手动复制粘贴既不可靠，凭证还会经过剪贴板。
+ * **不是打开酷安的验证页**，而是在应用内构造一个本地页面：
  *
- * 这里用 Tauri 的 `WebviewWindow` 在应用内打开酷安验证页，
- * 用户完成后由后端调用 `WebviewWindow::cookies()` 直接读取凭证。
+ * ```
+ * 1. 页面引入 https://cstaticdun.126.net/load.min.js（网易易盾）
+ * 2. 调 initNECaptcha({ captchaId, onVerify })
+ * 3. onVerify 回调拿到 data.validate
+ * 4. 通过 Tauri IPC 回传给 Rust（命令 captcha_result）
+ * 5. 用户点确认后，Rust 用凭证重放原请求
+ * ```
+ *
+ * 早期我打开 `account.coolapk.com/auth/login` 是错的——
+ * 那个页面根本不会把 validate 交给应用。
  *
  * # 凭证流向
  *
- * WebView Cookie → Rust 内存 → 拼装 proof → 重放原请求
- * 全程不落盘、不进日志、不经过前端。
+ * 易盾 JS → Tauri IPC → Rust 暂存 → 拼装 proof → 重放原请求
+ * 全程不落盘、不进日志、不经过前端渲染。
  */
 
 interface InvokeResult<T> {
@@ -24,14 +31,12 @@ interface InvokeResult<T> {
   error: BackendError | null
 }
 
-/** 读取验证窗口 Cookie 的结果。 */
-export interface CookieReadResult {
-  validate: string | null
-  cookie_names: string[]
-  message: string
-}
-
-/** 打开应用内嵌验证窗口。若已打开则聚焦。 */
+/**
+ * 打开验证窗口。
+ *
+ * 后端会取当前挑战的 captchaId 构造页面，所以必须先有挑战
+ * （即已经遇到过 1004）。
+ */
 export async function openCaptchaWindow(): Promise<void> {
   await invoke<void>('open_captcha_window')
 }
@@ -42,16 +47,7 @@ export async function closeCaptchaWindow(): Promise<void> {
 }
 
 /**
- * 读取验证窗口里的凭证（仅用于诊断，不会拿到前端）。
- *
- * 正常流程不需要调用它——`completeCaptcha` 内部会读。
- */
-export async function readCaptchaValidate(): Promise<CookieReadResult> {
-  return invoke<CookieReadResult>('read_captcha_validate')
-}
-
-/**
- * 用户确认已完成验证：后端读取凭证、重放原请求、返回结果。
+ * 用户确认完成验证：后端用已收到的 validate 重放原请求。
  *
  * 返回值就是重放得到的响应体，调用方应直接渲染，
  * 不要再发一次同样的请求——那会白白消耗重放机会。

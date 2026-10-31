@@ -98,11 +98,12 @@ pub fn run() {
             commands::set_public_fallback,
             commands::open_captcha_window,
             commands::close_captcha_window,
-            commands::read_captcha_validate,
+            commands::captcha_result,
             commands::complete_captcha
         ])
         .run(tauri::generate_context!())
         .expect("启动 coolall 失败");
 }
+
 
 

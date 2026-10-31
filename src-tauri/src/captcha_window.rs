@@ -1,93 +1,183 @@
-//! 验证码窗口：用应用内嵌 WebView 打开酷安验证页，
-//! 用户完成后由应用直接读取 WebView 的 Cookie 获得 `validate`。
+//! 验证码窗口：自建本地页面加载网易易盾 SDK，通过 Tauri IPC 回传 validate。
 //!
-//! # 为什么不用外部浏览器
+//! # 真实机制（从参考项目 c001apk 的 CaptchaActivity.kt 核实）
 //!
-//! 外部浏览器是独立进程，其 Cookie 归浏览器管，应用无法读取。
-//! 用户手动复制粘贴既不可靠也不安全（凭证会经过剪贴板）。
+//! 关键发现：**不是打开酷安的验证页，而是自己构造一个 HTML 页面**。
 //!
-//! # 为什么用 `cookies()` 而不是 CDP
+//! ```
+//! 1. 本地页面引入 https://cstaticdun.126.net/load.min.js
+//! 2. 调 initNECaptcha({ captchaId, onVerify })
+//! 3. onVerify 回调里拿到 data.validate
+//! 4. 通过 JS 桥回传给原生
+//! ```
 //!
-//! Tauri 2.12+ 的 `WebviewWindow::cookies()` 是官方 API，
-//! 能读到 HttpOnly / Secure cookie，比调用 WebView2 的 CDP 更稳。
+//! 之前我打开 `account.coolapk.com/auth/login` 是错的——
+//! 那个页面不会把 validate 回传给应用。
 //!
-//! # Windows 上的死锁陷阱
+//! # 为什么用 IPC 而不是读 Cookie
 //!
-//! 官方文档明确说明：在**同步**命令或事件处理器里调用 `cookies()` 会死锁
-//! （wry#583）。因此本模块的所有对外函数都必须是 `async`，
-//! 且读取动作放在 `spawn_blocking` 里。
-
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+//! 易盾的 validate 是 JS 回调里的值，不一定会写进 Cookie。
+//! 参考项目用的是 `WebMessageListener`，Tauri 的等价物是
+//! `window.__TAURI_INTERNALS__.invoke`。
+//!
+//! # 安全约束
+//!
+//! 验证页加载的是**远程脚本**，必须限制它能做什么：
+//! - 窗口不给任何额外 IPC 权限（见 capabilities/captcha.json）
+//! - 页面禁用文件访问、禁止弹出新窗口
+//! - 只接受 `captcha_result` 这一个命令
 
 use serde::{Deserialize, Serialize};
+// get_webview_window 来自 Manager trait，必须引入
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
-/// 验证窗口的标签。窗口能力配置里按这个标签授权。
+/// 验证窗口标签。
 pub const CAPTCHA_WINDOW_LABEL: &str = "captcha";
 
-/// 酷安验证页地址。
-///
-/// 用登录页而不是单独的验证码页：
-/// 酷安的人机验证是在登录流程中触发的，登录页会自己弹出易盾。
-pub const CAPTCHA_PAGE_URL: &str = "https://account.coolapk.com/auth/login?type=mobile";
+/// 易盾脚本地址。
+pub const NECAPTCHA_SDK_URL: &str = "https://cstaticdun.126.net/load.min.js";
 
-/// 读取结果。
+/// 验证结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CookieReadResult {
-    /// 从 Cookie 里提取到的 validate（已解码）
+pub struct CaptchaResult {
     pub validate: Option<String>,
-    /// 找到的相关 Cookie 名（便于诊断，不含值）
-    pub cookie_names: Vec<String>,
-    /// 诊断信息
     pub message: String,
 }
 
-/// 从一组 Cookie 里提取 validate。
+/// 校验 validate 格式。
 ///
-/// 凭证可能以两种形式存在：
-/// - 名称为 `validate` 的 Cookie
-/// - 名称含 `validate` 的其它形态（兼容服务端命名变化）
-///
-/// 值可能被 URL 编码，这里还原一次。
-pub fn extract_validate(
-    cookies: &[(String, String)],
-) -> (Option<String>, Vec<String>) {
-    let names: Vec<String> = cookies.iter().map(|(n, _)| n.clone()).collect();
-
-    for (name, value) in cookies {
-        if name.eq_ignore_ascii_case("validate") || name.to_lowercase().contains("validate") {
-            let decoded = urlencoding::decode(value)
-                .map(|c| c.into_owned())
-                .unwrap_or_else(|_| value.clone());
-            if !decoded.is_empty() {
-                return (Some(decoded), names);
-            }
-        }
-    }
-    (None, names)
+/// 规则来自 PROTOCOL.md §9.3：
+/// 非空、长度 ≤ 8192、不含空白与控制字符。
+pub fn valid_validate(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 8192
+        && !value.chars().any(|c| c.is_whitespace() || (c as u32) < 32)
 }
 
-/// 打开验证窗口。若已存在则聚焦。
-pub fn open_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
-    if let Some(existing) = app.get_webview_window(CAPTCHA_WINDOW_LABEL) {
-        let _ = existing.show();
-        let _ = existing.set_focus();
-        return Ok(());
+/// 构造验证页面的 HTML。
+///
+/// `captcha_id` 来自挑战本身（`CaptchaChallenge.id`），
+/// 不是硬编码的——每个挑战有自己的 id。
+pub fn build_captcha_html(captcha_id: &str) -> String {
+    // 防止注入：id 只允许字母数字
+    let safe_id: String = captcha_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+
+    format!(
+        r#"<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{
+    font: 16px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    margin: 24px; background: Canvas; color: CanvasText;
+    display: flex; flex-direction: column; align-items: center;
+  }}
+  #status {{ color: GrayText; margin-bottom: 16px; text-align: center; }}
+  #captcha {{ display: flex; justify-content: center; }}
+</style>
+<p id="status">正在加载验证组件…</p>
+<div id="captcha"></div>
+<script>
+(function () {{
+  var CAPTCHA_ID = "{safe_id}";
+  var statusEl = document.getElementById('status');
+
+  function statusText(t) {{ statusEl.textContent = t; }}
+
+  function report(payload) {{
+    // 通过 Tauri IPC 回传给 Rust 端
+    if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
+      window.__TAURI_INTERNALS__.invoke('captcha_result', payload);
+    }} else {{
+      statusText('内部错误：IPC 不可用');
+    }}
+  }}
+
+  var timeout = setTimeout(function () {{
+    statusText('加载超时，请点击重新加载');
+  }}, 15000);
+
+  var script = document.createElement('script');
+  script.src = '{NECAPTCHA_SDK_URL}';
+  script.onerror = function () {{
+    clearTimeout(timeout);
+    statusText('验证组件加载失败，请检查网络后重试');
+  }};
+  script.onload = function () {{
+    try {{
+      initNECaptcha({{
+        captchaId: CAPTCHA_ID,
+        element: '#captcha',
+        protocol: 'https',
+        mode: 'embed',
+        apiVersion: 2,
+        width: Math.min(320, window.innerWidth - 48) + 'px',
+        lang: 'zh-CN',
+        onVerify: function (err, data) {{
+          clearTimeout(timeout);
+          if (!err && data && data.validate) {{
+            statusText('验证通过');
+            report({{ validate: data.validate, message: 'ok' }});
+          }} else {{
+            statusText('验证未通过，请重试');
+          }}
+        }}
+      }},
+      function () {{
+        clearTimeout(timeout);
+        statusText('请按下方提示完成人机验证');
+      }},
+      function () {{
+        clearTimeout(timeout);
+        statusText('初始化失败，请点击重新加载');
+      }});
+    }} catch (e) {{
+      clearTimeout(timeout);
+      statusText('初始化失败：' + e);
+    }}
+  }};
+  document.head.appendChild(script);
+}})();
+</script>
+</html>"#
+    )
+}
+
+/// 打开验证窗口。
+pub fn open_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    captcha_id: &str,
+) -> Result<(), String> {
+    // 若已存在则先关掉，避免用旧 captchaId 的页面
+    if let Some(old) = app.get_webview_window(CAPTCHA_WINDOW_LABEL) {
+        let _ = old.close();
     }
 
-    // WebviewUrl::External 需要 url::Url，不是 String
-    let url = CAPTCHA_PAGE_URL
-        .parse::<url::Url>()
-        .map_err(|e| format!("验证页地址无效：{e}"))?;
+    let html = build_captcha_html(captcha_id);
 
-    WebviewWindowBuilder::new(app, CAPTCHA_WINDOW_LABEL, WebviewUrl::External(url))
-        .title("完成人机验证")
-        .inner_size(520.0, 720.0)
-        .min_inner_size(400.0, 560.0)
+    // 用一个无效域名做 base，确保页面无同源来源，
+    // 无法读取应用自身的任何资源。
+    let base: url::Url = "https://captcha.coolall.invalid/"
+        .parse()
+        .map_err(|e| format!("base url 无效：{e}"))?;
+
+    WebviewWindowBuilder::new(app, CAPTCHA_WINDOW_LABEL, WebviewUrl::External(base))
+        .title("人机验证")
+        .inner_size(420.0, 560.0)
+        .min_inner_size(360.0, 480.0)
         .center()
         .build()
-        .map_err(|e| format!("创建验证窗口失败：{e}"))?;
+        .map_err(|e| format!("创建验证窗口失败：{e}"))?
+        .eval(&format!(
+            "document.open();document.write({});document.close();",
+            serde_json::to_string(&html).map_err(|e| e.to_string())?
+        ))
+        .map_err(|e| format!("写入验证页面失败：{e}"))?;
 
     Ok(())
 }
@@ -99,115 +189,45 @@ pub fn close_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
-/// 读取验证窗口里的 Cookie 并提取 validate。
-///
-/// **必须是 async**：Windows 上同步调用 `cookies()` 会死锁（wry#583）。
-pub async fn read_validate<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<CookieReadResult, String> {
-    let Some(win) = app.get_webview_window(CAPTCHA_WINDOW_LABEL) else {
-        return Err("验证窗口未打开".into());
-    };
-
-    // 再套一层 spawn_blocking：官方建议用独立线程读取
-    let raw = tokio::task::spawn_blocking(move || win.cookies())
-        .await
-        .map_err(|e| format!("读取任务失败：{e}"))?;
-
-    let cookies = raw.map_err(|e| format!("读取 Cookie 失败：{e}"))?;
-
-    let pairs: Vec<(String, String)> = cookies
-        .into_iter()
-        .map(|c| (c.name().to_string(), c.value().to_string()))
-        .collect();
-
-    let (validate, names) = extract_validate(&pairs);
-
-    let message = if validate.is_some() {
-        "已从验证窗口读取到凭证".to_string()
-    } else {
-        format!(
-            "未找到 validate Cookie。当前有 {} 个 Cookie：{}",
-            names.len(),
-            names.join(", ")
-        )
-    };
-
-    Ok(CookieReadResult {
-        validate,
-        cookie_names: names,
-        message,
-    })
-}
-
-/// 一次性标记：防止同一窗口被重复读取造成凭证混乱。
-#[derive(Default)]
-pub struct CaptchaWindowState {
-    pub reading: Arc<AtomicBool>,
-}
-
-impl CaptchaWindowState {
-    pub fn try_begin(&self) -> bool {
-        !self.reading.swap(true, Ordering::SeqCst)
-    }
-
-    pub fn end(&self) {
-        self.reading.store(false, Ordering::SeqCst);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
-        items
-            .iter()
-            .map(|(a, b)| (a.to_string(), b.to_string()))
-            .collect()
+    #[test]
+    fn html_contains_sdk_and_id() {
+        let html = build_captcha_html("414e5c9b866a03db03f860a1a9101672");
+        assert!(html.contains(NECAPTCHA_SDK_URL));
+        assert!(html.contains("414e5c9b866a03db03f860a1a9101672"));
+        assert!(html.contains("initNECaptcha"));
+        assert!(html.contains("onVerify"));
     }
 
     #[test]
-    fn finds_plain_validate_cookie() {
-        let c = pairs(&[("SESSID", "abc"), ("validate", "xyz123")]);
-        let (v, names) = extract_validate(&c);
-        assert_eq!(v.as_deref(), Some("xyz123"));
-        assert!(names.contains(&"validate".to_string()));
+    fn html_uses_ipc_invoke() {
+        let html = build_captcha_html("abc123");
+        assert!(html.contains("__TAURI_INTERNALS__"));
+        assert!(html.contains("captcha_result"));
     }
 
     #[test]
-    fn decodes_url_encoded_value() {
-        let c = pairs(&[("validate", "a%2Fb%3Dc")]);
-        let (v, _) = extract_validate(&c);
-        assert_eq!(v.as_deref(), Some("a/b=c"), "应还原 URL 编码");
+    fn html_filters_dangerous_id_chars() {
+        // 防止把引号/尖括号注入到 JS 字符串
+        let html = build_captcha_html("ab\"c<script>alert(1)</script>");
+        assert!(!html.contains("<script>alert"), "不应能注入脚本");
+        assert!(html.contains("abcscriptalert1script"), "非字母数字应被过滤");
     }
 
     #[test]
-    fn finds_validate_with_suffix() {
-        let c = pairs(&[("validate_token", "tok")]);
-        let (v, _) = extract_validate(&c);
-        assert_eq!(v.as_deref(), Some("tok"));
+    fn valid_validate_accepts_normal() {
+        assert!(valid_validate("abc123"));
+        assert!(valid_validate("NEC%3A414e5c9b%3Axyz"));
     }
 
     #[test]
-    fn returns_none_when_absent() {
-        let c = pairs(&[("SESSID", "abc"), ("uid", "42")]);
-        let (v, names) = extract_validate(&c);
-        assert!(v.is_none());
-        assert_eq!(names.len(), 2);
-    }
-
-    #[test]
-    fn ignores_empty_value() {
-        let c = pairs(&[("validate", "")]);
-        let (v, _) = extract_validate(&c);
-        assert!(v.is_none(), "空值不算有效凭证");
-    }
-
-    #[test]
-    fn is_case_insensitive() {
-        let c = pairs(&[("Validate", "V1")]);
-        let (v, _) = extract_validate(&c);
-        assert_eq!(v.as_deref(), Some("V1"));
+    fn valid_validate_rejects_bad() {
+        assert!(!valid_validate(""));
+        assert!(!valid_validate("has space"));
+        assert!(!valid_validate("line\nbreak"));
+        assert!(!valid_validate(&"x".repeat(8193)));
     }
 }

@@ -1,4 +1,4 @@
-//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
+﻿//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
 //!
 //! 调用者不需要知道 TokenV3、设备编码、Cookie 维护的任何细节。
 //! 设计依据见 `docs/ARCHITECTURE.md`。
@@ -62,6 +62,8 @@ pub struct CoolapkClient {
     session: Arc<Mutex<Session>>,
     /// 当前待完成的验证挑战（含原 URL，供重放使用）
     pending_captcha: Option<PendingCaptcha>,
+    /// 验证页回传但尚未确认提交的 validate
+    staged_validate: Option<String>,
     /// 是否允许公开页兜底。由前端在用户放弃验证时显式开启。
     allow_public_fallback: bool,
     /// 重放守卫：保证每个验证流程只重放一次
@@ -99,6 +101,7 @@ impl CoolapkClient {
             identity,
             session: Arc::new(Mutex::new(Session::default())),
             pending_captcha: None,
+            staged_validate: None,
             allow_public_fallback: false,
             replay_guard: ReplayGuard::default(),
             store_path,
@@ -401,10 +404,23 @@ impl CoolapkClient {
 
     /// 当前待完成的验证挑战（若有）。
     ///
-    /// 供 `complete_captcha` 命令使用：用户名在内嵌窗口完成验证后，
-    /// 后端需要用这个挑战的 id/field 组装凭证并重放原请求。
+    /// 供 `open_captcha_window` 取 captchaId（要传给易盾），
+    /// 也供 `complete_captcha` 取 field（决定凭证放 Cookie 还是查询参数）。
     pub fn pending_captcha(&self) -> Option<&PendingCaptcha> {
         self.pending_captcha.as_ref()
+    }
+
+    /// 暂存验证页回传的 validate。
+    ///
+    /// 为什么不直接重放：页面显示「验证通过」后还需要用户点确认，
+    /// 中间会有短暂间隔。暂存让它与重放解耦。
+    pub fn stage_validate(&mut self, validate: String) {
+        self.staged_validate = Some(validate);
+    }
+
+    /// 取出并清空暂存的 validate。
+    pub fn take_staged_validate(&mut self) -> Option<String> {
+        self.staged_validate.take()
     }
 
     /// 设置是否允许公开页兜底。
@@ -492,6 +508,7 @@ impl CoolapkClient {
             session: Arc::new(Mutex::new(Session::default())),
             pending_captcha: None,
             replay_guard: ReplayGuard::default(),
+            staged_validate: None,
             allow_public_fallback: false,
             store_path: None,
         }
@@ -842,6 +859,7 @@ mod tests {
         assert_eq!(BrowseTarget::parse("nope"), None);
     }
 }
+
 
 
 
