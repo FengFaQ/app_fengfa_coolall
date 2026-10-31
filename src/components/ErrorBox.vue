@@ -1,11 +1,18 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { ApiError } from '../api'
+import CaptchaBox from './CaptchaBox.vue'
 
 const props = defineProps<{
   error: unknown
 }>()
 
 const emit = defineEmits<{ retry: [] }>()
+
+/// 需要人机验证时，交给专用组件处理（它要展示操作入口与输入框）
+const needsCaptcha = computed(
+  () => props.error instanceof ApiError && props.error.needsCaptcha,
+)
 
 function describe(err: unknown) {
   if (err instanceof ApiError) {
@@ -16,11 +23,18 @@ function describe(err: unknown) {
 </script>
 
 <template>
-  <div class="error-box">
+  <CaptchaBox
+    v-if="needsCaptcha"
+    :error="error"
+    @retry="emit('retry')"
+    @dismiss="emit('retry')"
+  />
+
+  <div v-else class="error-box">
     <div class="icon">!</div>
-    <p class="message">{{ describe(props.error).message }}</p>
+    <p class="message">{{ describe(error).message }}</p>
     <button
-      v-if="describe(props.error).retryable"
+      v-if="describe(error).retryable"
       class="btn btn-primary"
       @click="emit('retry')"
     >

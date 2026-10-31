@@ -1,4 +1,4 @@
-﻿//! 酷安 TokenV3 请求签名。
+//! 酷安 TokenV3 请求签名。
 //!
 //! 算法结构见 `docs/PROTOCOL.md` §3。本实现独立于上游，仅按协议契约重写，
 //! 并与 `tools/verify_token_v3.py` 的输出逐字节交叉校验。
@@ -152,7 +152,7 @@ pub fn create(device: &str, app_code: i64, timestamp: i64) -> Result<String, Tok
             continue;
         };
 
-        let Ok(mut hashed) = bcrypt::hash_with_salt(password.as_bytes(), 4, raw_salt) else {
+        let Ok(hashed) = bcrypt::hash_with_salt(password.as_bytes(), 4, raw_salt) else {
             continue;
         };
 

@@ -8,6 +8,7 @@
 //!
 //! 模块说明见 `../docs/ARCHITECTURE.md`。
 
+pub mod captcha;
 pub mod device;
 pub mod error;
 pub mod request;

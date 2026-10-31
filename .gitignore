@@ -55,3 +55,6 @@ tools/s1-check/
 # 子 crate 不单独维护锁文件（由 workspace 根统一）
 crates/*/Cargo.lock
 
+
+src-tauri/Cargo.lock
+

@@ -1,5 +1,213 @@
 # CI 构建诊断
 
+> 本文件按 run 顺序累积。**最新一轮在最前面**，历史轮次在下方【历史】小节。
+
+---
+
+# 轮次 2：run `41205566621`（commit `34fb069`）—— ⚠️ 首次跑通 Windows 打包，但编译失败
+
+> 诊断时间：2026-10-31T21:32+08:00（UTC 13:31）
+> 报告性质：只读诊断，未修改任何源码，未执行任何 push。
+> **重要**：GitHub 上 HEAD 实际已推进到 `7bf2909`（"架构文档对齐实现现状"），本 run 打的是 `34fb069`。本地工作区另有未提交改动，下列行号均以**本 run 实际编译的 `34fb069`** 为准。
+
+## 运行概况
+
+| 项 | 值 |
+| --- | --- |
+| run id | `41205566621` |
+| commit | `34fb0695bcb7e7bae4e75f9e76d1b63f19802447`（修复编译阻塞与安全漏洞，拆分协议核心为独立 crate） |
+| 状态 | `completed` / **failure** |
+| 起止 | 2026-10-31T13:26:25Z → 13:31:55Z（约 5 分 30 秒） |
+| 并发 | 前端检查 / Rust 测试 并行启动，Windows 打包在两者都绿后才开始 |
+
+## 各 Job 结果
+
+| Job | Job ID | 状态 | 耗时 | 说明 |
+| --- | --- | --- | --- | --- |
+| 前端检查 | `124549825337` | ✅ success | 13:26:28 → 13:26:45（17s） | 类型检查、构建、上传 `dist` 全部通过 |
+| Rust 测试 | `124549825469` | ✅ success | 13:26:28 → 13:26:54（26s） | 拆 crate 后不再需要 WebKitGTK，**修复生效** |
+| Windows 打包 | `124549926905` | ❌ **failure** | 13:26:57 → 13:31:55（4m58s） | 失败 step：**构建**（`[7]`）；`列出产物` `[8]`、`上传产物` `[9]` 均 skipped |
+
+**产物**：仅 1 个 artifact —— `dist`（61,273 bytes，前端产物）。**没有 exe，没有 `coolall-windows`**。
+
+## 本轮修复的验证结论
+
+| 上一轮问题 | 本次修复 | 结果 |
+| --- | --- | --- |
+| 前端无测试文件 → 失败 | 删除测试 step / 新增 `src/api/index.test.ts` | ✅ 前端检查已绿 |
+| `std::sync::Mutex` 跨 await（4 个 future not Send） | 改为 `tokio::sync::Mutex` | ✅ **已消除**，本轮无 `Send` 错误 |
+| 缺 `use tauri::Manager`（E0599） | 已补（`lib.rs:172` 函数内） | ✅ **已消除** |
+| 测试 job 未建 `dist/` → `generate_context!` panic | Rust 测试 job 改只测 `coolall-core` | ✅ **已消除** |
+| **E0255 宏重复定义（14 个）** | 拆 crate 但 **`lib.rs` 命令函数未拆分** | ❌ **仍在**（本轮 Windows 打包 14 个） |
+| — | — | 🆕 **新暴露 E0308**（`submit_validation` 缺 `.await`） |
+
+> 结论：**不是"修复没生效"，而是"修复不完整"** —— 上一轮我预警过的 E0255 结构性根因一直没修，只是被"Rust 测试 job 不再编译 GUI"掩盖了；Windows 打包一旦真正编译 `src-tauri`，它就原样重现。
+
+## 失败分析：Windows 打包 / 构建 step
+
+- **Job**：`Windows 打包`（`124549926905`）
+- **失败 step**：`[7] 构建` → `npm run tauri:build`（`build.yml:91-92`）
+- **耗时**：编译约 4 分（13:27:33 开始，13:31:51 失败）
+- **退出码**：1
+
+### 前置步骤均正常（排除你提的 4 类猜测中的 3 类）
+
+从日志可确认以下**都不是**本次失败原因：
+
+- `beforeBuildCommand npm run build` → `vite build` 成功（`13:27:33` 执行，产物已上传）
+- `Updating crates.io index` → 依赖解析正常，`tauri 2.12.5` 单版本，无 workspace 路径错误
+- 已进入 `Compiling coolall v0.1.0`（`13:31:32`），说明 **Rust 工具链、WebView2、NSIS 都还没轮到报错**——失败发生在 **Rust 编译期**，压根没走到打包阶段
+
+> 你猜的 icon.ico / NSIS / WebView2 SDK 问题，**本轮均未被触发**（因为编译就没过）。等编译修好后才会知道这些是否是真问题。
+
+### 原始报错（关键行）
+
+```
+error[E0255]: the name `__cmd__browse` is defined multiple times
+  --> src-tauri\src\lib.rs:59:14
+58 | #[tauri::command]
+   | ----------------- previous definition of the macro `__cmd__browse` here
+59 | pub async fn browse(
+   |              -^^^^^
+   |              `__cmd__browse` reimported here
+   |              help: remove unnecessary import
+   = note: `__cmd__browse` must be defined only once in the macro namespace of this module
+```
+
+同型错误覆盖 7 个命令 × 2 个符号 = **14 个 E0255**：
+
+| 命令 | `#[tauri::command]` 行 | fn 行 |
+| --- | --- | --- |
+| `browse` | 58 | 59 |
+| `detail` | 78 | 79 |
+| `replies` | 97 | 98 |
+| `search` | 117 | 118 |
+| `session_info` | 137 | 138 |
+| `submit_validation` | 147 | 148 |
+| `import_shuzlm_id` | 162 | 163 |
+
+新增 E0308：
+
+```
+error[E0308]: mismatched types
+   --> src-tauri\src\lib.rs:158:8
+158 |     Ok(client.submit_validation(&challenge_id, &field, &validate))
+    |     -- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `bool`, found future
+note: calling an async function returns a future
+help: consider `await`ing on the `Future`
+    |     Ok(client.submit_validation(&challenge_id, &field, &validate).await)
+    |                                                                  ++++++
+```
+
+收尾：
+
+```
+error: could not compile `coolall` (lib) due to 15 previous errors
+failed to build app: failed to build app
+##[error]Process completed with exit code 1.
+```
+
+## 根因判断
+
+### 根因 1（P0，阻断打包）：`src-tauri/src/lib.rs` 的命令函数与 `generate_handler!` 仍在同一模块
+
+我核对了 `34fb069` 的源码，**排除了几个常见误判**：
+
+- ✅ 源码里 `#[tauri::command]` **只有 7 处**，每个 fn 各一次，**没有重复写属性**
+- ✅ 没有任何 `use ...::*` glob 导入（`lib.rs:14-17` 只导出 `device/error/request/token_v3/Error/TokenError`）
+- ✅ `crates/coolall-core` 里**不存在** `browse/detail/...` 等同名函数（那些在 `client.rs` 的 `client::` 模块内，不污染 `lib.rs` 命名空间）
+- ✅ `Cargo.lock` 只有一个 `tauri 2.12.5`，无版本重复
+
+**真正的机制**：`src-tauri/Cargo.toml` 声明了
+
+```toml
+[lib]
+name = "coolall_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+```
+
+同一份 `src/lib.rs` 被以 **3 种 crate 类型**编译。`#[tauri::command]` 宏把 `__cmd__<fn>` 生成在**模块级宏命名空间**；在多 crate-type 同源编译路径下，宏导入被重复注入到同一个模块，于是宏命名空间里出现两份同名符号 → E0255「reimported here」。
+
+> 不确定性说明：本机未安装 Rust 工具链（`cargo` 不存在），我**无法在本地复现验证**。上述为基于「源码干净 + 报错形态 + crate-type 三合一」的静态推断。E0255 的原文 `help: remove unnecessary import` 指向的正是「同一模块被重复导入」这一形态，而非「用户写了两次属性」。
+
+**修复建议（精确到文件行，按推荐度排序）**
+
+**方案 A（推荐，最小改动、直击病因）：把命令函数移出 crate 根模块**
+
+1. 新建 `src-tauri/src/commands.rs`，把 `lib.rs:57-167` 整段（7 个 `#[tauri::command]` 函数）整体迁入。
+2. `src-tauri/src/lib.rs:11` 附近（`pub mod client;` 之后）加一行：
+   ```rust
+   mod commands;
+   ```
+3. `lib.rs:195-203` 的 `generate_handler!` 改为带路径引用：
+   ```rust
+   .invoke_handler(tauri::generate_handler![
+       commands::browse,
+       commands::detail,
+       commands::replies,
+       commands::search,
+       commands::session_info,
+       commands::submit_validation,
+       commands::import_shuzlm_id
+   ])
+   ```
+4. `commands.rs` 顶部需要 `use crate::client;`、`use crate::AppState;`、`use crate::InvokeResult;`、`use tauri::State;`，并把 `AppState`/`InvokeResult`（`lib.rs:27-55`）保持 `pub` 不变。
+
+**方案 B（治标、验证成本低）：收敛 crate-type**
+
+`src-tauri/Cargo.toml` 的 `crate-type = ["staticlib", "cdylib", "rlib"]` 改为：
+```toml
+crate-type = ["lib", "cdylib", "staticlib"]
+```
+注意：`staticlib`/`cdylib` 是 Tauri 移动端需要的，桌面端主要用 rlib。**若本期只出 Windows 桌面包**，可临时只留 `["rlib"]` 来验证 E0255 是否消失；确认后再逐步恢复。**这会改变产物形态，需 Lead 决策**，不建议作为最终修复。
+
+**方案 C（不推荐）：逐个 `#[tauri::command]` 加 `skip_rename` 或手动改宏名** —— Tauri 2 不支持该参数，此路不通，列出以免有人尝试。
+
+### 根因 2（P0，一行修复）：`submit_validation` 漏了 `.await`
+
+- **文件行**：`src-tauri/src/lib.rs:157`（`34fb069` 版本）
+- **现状**：
+  ```rust
+  Ok(client.submit_validation(&challenge_id, &field, &validate))
+  ```
+- **应为**：
+  ```rust
+  Ok(client.submit_validation(&challenge_id, &field, &validate).await)
+  ```
+- **原因**：这是 Mutex 改造的**遗漏项**。`client.rs:340-345` 在 `34fb069` 中已是 `pub async fn submit_validation(&self, ...) -> bool`（**返回 `bool`，不是 `Result`**），但 `lib.rs:157` 仍按同步函数调用，于是 `Ok(<Future>)` 类型不匹配。
+- ⚠️ **不要照抄编译器建议**：rustc 提示的是
+  `Ok(client.submit_validation(...).await)` —— 这个是对的；但**必须保留外层 `Ok(...)`**，因为签名是 `-> Result<bool, String>` 而函数返回裸 `bool`。若误删 `Ok` 会得到新的类型错误。
+
+> 本地工作区（未提交）里这行**已经改成 `.await` 了**（见 `lib.rs:153-157`），说明有人已发现并修了。**但 `34fb069` 里没有**，所以本 run 失败。请确认修复已提交。
+
+### 附带发现：一个陈旧且未忽略的 `src-tauri/Cargo.lock`
+
+- `src-tauri/Cargo.lock` **被 git 跟踪**（`git ls-files` 命中），且停在 `f445201` 那一版；
+- 它的 `[[package]] name = "coolall"` 依赖列表里**没有 `coolall-core`**，而根 `Cargo.lock:489` 有；
+- 两份 lock **内容不同**（root 123,480 字节 / src-tauri 126,772 字节）。
+
+因为 `src-tauri/Cargo.toml` 没有自己的 `[workspace]`，它属于根 workspace，cargo 实际用**根 `Cargo.lock`**，所以本 run 看到 `Updating crates.io index` 正常重解析、并未因此直接报错。**这不是本次失败的根因**，但属于卫生问题：CI 上是全新 clone，若哪天有人单独在 `src-tauri/` 下执行 cargo，可能拿到过期锁。
+
+建议：`git rm --cached src-tauri/Cargo.lock`（并在 `.gitignore` 的 Rust 段加 `src-tauri/Cargo.lock`，与既有的 `crates/*/Cargo.lock` 规则一致）。
+
+## 产物清单
+
+| artifact | 大小 | 来源 job |
+| --- | --- | --- |
+| `dist` | 61,273 bytes | 前端检查 |
+| `coolall-windows` | **无** | Windows 打包失败，未上传 |
+
+**没有任何 exe 产物。** 期望产物（`build.yml:104-107`）：`src-tauri/target/release/bundle/nsis/*.exe`、`bundle/msi/*.msi`、`src-tauri/target/release/coolall.exe`。
+
+## 下一步建议
+
+修好上述 2 个根因（`lib.rs` 命令拆分 + 补 `.await`）后重跑，Windows 打包才**第一次真正进入 NSIS 打包阶段**。届时若仍失败，再按你列的 4 类方向查（尤其 icon.ico 单尺寸 PNG 内嵌是否被 NSIS 接受），我会继续盯。
+
+---
+---
+
+# 【历史】轮次 1：run `41204567050`（commit `f445201`）—— 失败
+
 > 监控对象：GitHub Actions run `41204567050`　仓库 `FengFaQ/app_fengfa_coolall`
 > 诊断时间：2026-10-31T21:13+08:00（UTC 13:13）
 > 报告性质：只读诊断，未修改任何源码，未执行任何 push。

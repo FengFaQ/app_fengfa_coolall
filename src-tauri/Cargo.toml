@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "coolall"
 version = "0.1.0"
 description = "基于 Tauri 2 与 Vue 3 的非官方酷安客户端"
@@ -9,6 +9,10 @@ repository = "https://github.com/FengFaQ/app_fengfa_coolall"
 
 [lib]
 name = "coolall_lib"
+# 桌面端用 rlib；staticlib/cdylib 供移动端（Android/iOS）使用。
+# 注：曾怀疑多 crate-type 导致 #[tauri::command] 的 E0255，
+# 实测证明无关——根因是命令函数直接定义在 lib.rs 里。
+# 真正的修法是把命令移到 commands.rs 子模块。
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -45,8 +49,6 @@ urlencoding = "2"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
-[profile.release]
-strip = true
-lto = true
-codegen-units = 1
-opt-level = "s"
+# 注意：release profile 必须写在 workspace 根（见 ../../Cargo.toml），
+# 写在这里会被 cargo 忽略并发出警告。
+

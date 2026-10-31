@@ -1,3 +1,10 @@
-﻿[workspace]
+[workspace]
 resolver = "2"
 members = ["crates/coolall-core", "src-tauri"]
+
+# release profile 只能定义在 workspace 根，写在成员 crate 里会被忽略
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"
