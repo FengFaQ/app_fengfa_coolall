@@ -1,4 +1,4 @@
-﻿//! coolall —— 非官方酷安客户端核心库
+//! coolall —— 非官方酷安客户端核心库
 //!
 //! 模块划分见 `docs/ARCHITECTURE.md`。
 //!
@@ -135,12 +135,11 @@ pub async fn search(
 
 /// 当前会话状态（是否登录、是否有验证凭证）。
 #[tauri::command]
-pub async fn session_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let client = state
-        .client
-        .lock()
-        .await;
-    Ok(client.session_info())
+pub async fn session_info(
+    state: State<'_, AppState>,
+) -> Result<InvokeResult<serde_json::Value>, String> {
+    let client = state.client.lock().await;
+    Ok(InvokeResult::success(client.session_info()))
 }
 
 /// 提交人机验证结果。

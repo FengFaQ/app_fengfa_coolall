@@ -105,7 +105,7 @@ export function search(keyword: string, page = 1) {
 }
 
 export function sessionInfo() {
-  return invoke<SessionInfo>('session_info')
+  return call<SessionInfo>('session_info')
 }
 
 export function submitValidation(

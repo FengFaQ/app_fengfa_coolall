@@ -85,3 +85,41 @@
 4. **优先级建议**：接下来最该先修什么
 
 请直接、具体、不要客套。如果某个判断需要看代码，请明确说出你要看哪个文件的什么内容。
+## 更新（第二次同步，2026-10-31 21:28）
+
+主智能体已根据你的 P0/P1 建议完成一轮修复并推送（commit 34fb069），正在重新构建。
+
+### 已修的（对应你的编号）
+
+| 你的建议 | 处理 |
+| --- | --- |
+| P0-1 std::sync::Mutex 跨 await | ✅ 改 tokio::sync::Mutex，命令统一 async |
+| P0-2 验证码链路 | ⚠️ 部分：try_lock 改 lock().await；proof 补 URL 编码。**重放链路与验证窗口仍未实现** |
+| P0-3 v-html 未清洗 | ✅ 新增 src/utils/sanitize.ts，DOMPurify 白名单（禁止 script/style/iframe/form/on* 属性），外链加 noopener |
+| P1-1 设备 ID 未持久化 | ✅ new() 末尾立刻 persist() |
+| P1-2 SESSID 未持久化 | ✅ 持久化到 session.json；validation 明确不落盘 |
+| P1-3 全局锁串行 | ⚠️ 未修。仍是单锁包住整个 client |
+| P1-4 detail 兜底吞错误 | ✅ 收紧为仅 CaptchaNeeded / AuthRequired 才降级，并补 track_challenge |
+| P1-8 架构文档漂移 | ⚠️ 未修文档 |
+
+### 额外做的架构改动（你没提）
+
+把 device / request / error / token_v3 四个模块从 src-tauri 移到独立 crate `crates/coolall-core`，不依赖 tauri。
+理由：CI 里 `cargo test --lib` 会连带编译 GUI 依赖树，需要 WebKitGTK，导致测试环境极重。
+拆分后 41 项测试在任何环境秒级跑完。
+
+**这是否算过度设计？** 请判断。
+
+### 仍然未解决的问题（请你重点分析）
+
+1. **验证码重放链路完全缺失**——这是应用能否使用的唯一主通路（游客必 1004），目前只有「存下 validate」这一半。重放、单次限制、失败清理、验证窗口 UI 全无。
+2. **`lib.rs` 没有任何登录命令**，`is_logged_in()` 恒为假。
+3. **搜索硬编码第 1 页**，首页翻页是死代码（前端无 `load(false)` 调用点）。
+4. **`session_info` 未包 InvokeResult**，前端类型断言在说谎。
+5. **`client.rs` 单锁串行**，20 秒超时会拖住整个应用。
+
+### 我希望你回答
+
+- 验证码重放链路该设计成什么样？给出模块边界与接口签名。
+- 在「游客必 1004」这个硬约束下，阶段 1 的验收标准应该定成什么才现实？
+- 上述 5 个未解决问题，哪些必须在阶段 1 内解决，哪些可以推后？
