@@ -97,16 +97,25 @@ jobs:
       - name: 列出产物
         shell: pwsh
         run: |
-          Get-ChildItem -Path src-tauri/target/release/bundle -Recurse -Include *.exe,*.msi |
+          # 注意：项目是 cargo workspace，target 目录在**仓库根**，
+          # 不在 src-tauri 下。写错路径会让这个步骤（以及后续上传）失败，
+          # 即使打包本身已经成功。
+          $bundle = "target/release/bundle"
+          if (-not (Test-Path $bundle)) {
+            Write-Error "产物目录不存在：$bundle"
+            exit 1
+          }
+          Get-ChildItem -Path $bundle -Recurse -Include *.exe,*.msi |
             Select-Object FullName, @{N='MB';E={[math]::Round($_.Length/1MB,2)}}
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: coolall-windows
+          # workspace 的 target 在仓库根
           path: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/coolall.exe
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+            target/release/coolall.exe
           if-no-files-found: error
           retention-days: 14

@@ -218,3 +218,51 @@ CI 现在正在跑（run 41207561567）。上一轮已经越过编译阶段，
 这次要看是否走到 NSIS 打包并真的产出 exe。
 
 如果打包成功，你建议的下一步「Windows 实机验收 ≤> 1004 → 完成验证 → 原请求成功」我就能做了。
+
+## 更新（第五次同步，2026-10-31 22:05）
+
+### 你的第四轮方案已完整落地
+
+| 你的设计 | 落地情况 |
+| --- | --- |
+| 手写 BoxFuture，不引入 async-trait | ✅ 采纳，理由已写入代码注释 |
+| transport.rs（HttpRequest/HttpResponse/TransportError/HttpTransport） | ✅ 已建 |
+| ReqwestTransport 生产 adapter | ✅ 已建 |
+| MockTransport（仅 cfg(test)） | ✅ 已建 |
+| 响应体用 Vec<u8> 而非 Value | ✅ 采纳（公开页需要 HTML） |
+| 响应头用 Vec 而非 HashMap | ✅ 采纳（多个 Set-Cookie） |
+| client.rs 拆出 process_response() | ✅ 已拆 |
+| QueryParam 重放也走 Cookie 回写 | ✅ 已修（你指出的不一致） |
+| with_test_transport() 测试构造 | ✅ 已加 |
+| 四组 MockTransport 测试 | ✅ 全部落地，另加第 5 组（挑战 ID 不匹配） |
+| commands.rs 不改 | ✅ 确认未改 |
+| coolall-core 不改 | ✅ 确认未改 |
+| Cargo.toml 不加依赖 | ✅ 确认未加 |
+
+**测试结果：`cargo test --lib` 14 项全过**，其中包括：
+- 1004 → QueryParam 验证 → 重放成功
+- 重放仍失败 → 清凭证 → 无第三次请求
+- 空 field → Cookie 重放且不改 URL
+- 挑战 ID 不匹配 → 拒绝且不发请求
+
+### 一个我要向你说明的流程问题
+
+CI 连续三次被我自己取消。原因：`build.yml` 里 `cancel-in-progress: true` 是全局的，
+每次推送都会杀掉正在跑的构建，而 Windows 打包要 10 分钟以上。
+
+已改为只在 PR 时取消，main 分支排队。
+
+### 当前状态
+
+- 本地有 1 个未推送提交（transport seam）
+- CI 正在跑旧代码（run 41207794134），它仍能验证 E0255 修复是否成功
+- 等它跑完我会推送 transport 改动
+
+### 我需要你回答
+
+1. 如果 Windows 打包成功产出 exe，下一步验收顺序你建议怎么走？
+   我打算：启动 exe → 看首页是否弹验证 → 完成验证 → 确认内容加载。
+   有没有遗漏的关键检查点？
+
+2. 如果打包失败在 NSIS 阶段（我怀疑 icon.ico 是 PNG 内嵌单尺寸不被接受），
+   有更稳妥的图标生成方式吗？
