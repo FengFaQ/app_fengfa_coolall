@@ -58,3 +58,8 @@ crates/*/Cargo.lock
 
 src-tauri/Cargo.lock
 
+
+# 临时工具的 Edge 用户数据目录（体积大且含锁文件）
+**/.edge-profile/
+**/dist/
+

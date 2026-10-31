@@ -393,3 +393,93 @@ Set-Cookie: token=deleted; Max-Age=0; path=/; domain=.coolapk.com
 | 需要数盟 ID 与真机指纹绑定 | 需要真机数据 |
 | 服务端对这个 IP 段/客户端群体有额外策略 | 无法验证 |
 | **必须抓包对比才能确定** | ✅ 唯一可行路径 |
+
+# 决定性实验：SESSID 与 TLS 指纹绑定（2026-11-01 07:50）
+
+## 实验设计
+
+在同一台手机（MEIZU 21）上，同时抓取：
+1. c001apk（OkHttp）的请求
+2. 手机自带 curl（BoringSSL）的请求
+
+两者**同设备、同网络、同 BoringSSL 基础库**，只有 TLS 配置不同。
+
+## 抓包结果对比
+
+| 项 | App (OkHttp) | curl (BoringSSL) |
+| --- | --- | --- |
+| 套件数 | **15** | **17** |
+| 套件顺序 | 1301 1302 1303 c02b c02c cca9 c02f c030 cca8 c013 c014 009c 009d 002f 0035 | 1301 1302 1303 c02b c02f c02c c030 cca9 cca8 c009 c013 c00a c014 009c 009d 002f 0035 |
+| 扩展顺序 | 0,23,65281,10,11,35,16,5,13,51,45,43,21 | 0,23,65281,10,11,16,13,51,45,43,21 |
+| 结果 | ✅ 能看内容 | ❌ 1004 |
+
+**同为 BoringSSL，仅因配置差异导致指纹不同，结果就完全不同。**
+
+## 更关键的实验
+
+从 App 的 `shared_prefs/coolapk_api_session.xml` 读出它**当前有效的 SESSID**：
+
+```
+a1-a068b5f8cc9fedc28816110f7de39ded6a63e99dbaa5ac5ab05e77568eae62ad
+```
+
+用这个**真实有效**的 SESSID，通过 curl 打 API：
+
+```
+结果：{"status":1004,"error":"null","message":"请求验证错误"}
+```
+
+**即使持有 App 的有效会话，换客户端仍然失败。**
+
+## 结论
+
+**SESSID 与 TLS 指纹绑定。** 服务端在建立会话时就记录了客户端指纹，
+之后每个请求都校验「会话 + 指纹」的匹配关系。
+
+这解释了此前所有失败：
+- 换任何设备串 → 1004（指纹不匹配）
+- 换任何 SESSID → 1004（指纹不匹配）
+- 用数盟真实 ID → 1004（指纹不匹配）
+- 用 WebView 会话 → 1004（指纹不匹配）
+- 用浏览器指纹 → 1004（不是 App 的指纹）
+
+## 为什么浏览器指纹也不行
+
+curl_cffi 模拟 chrome110/120/124/131、safari、firefox 全部 1004。
+说明服务端**只接受 OkHttp 的精确指纹**，不接受任何浏览器指纹。
+
+## 验证 App 的验证流程后发现了什么
+
+App 完成滑块验证后，`coolapk_api_session.xml` 里：
+
+```json
+{"session": {
+  "domain": "coolapk.com",
+  "expires": 1794095227538,
+  "hostname": false,
+  "identity": "ea687d68...",
+  "path": "/",
+  "value": "a1-a068b5f8..."
+}}
+```
+
+**只有 session，没有 validation 字段。**
+说明验证通过后拿到的就是一个正常 SESSID，没有额外的 validate 凭证。
+
+## 这意味着什么
+
+之前关于「人机验证」的整条链路设计（CaptchaBox / validate / proof）**可能是错的**：
+- App 弹验证 ≠ API 返回验证码挑战
+- 验证通过后只是换了个有效 SESSID
+- 1004 的本质是「会话未通过门禁认证」，认证手段包括 TLS 指纹
+
+## 当前技术判断
+
+| 路线 | 可行性 |
+| --- | --- |
+| 调整 rustls 指纹 | 需精确模拟 OkHttp 的 15 套件顺序 + 13 扩展顺序 |
+| 用浏览器指纹 | ❌ 已实测失败 |
+| 用 Android BoringSSL | 需精确配置，手机 curl 默认配置失败 |
+| WebView 发请求 | ❌ 已实测失败 |
+
+**唯一可行的方向：精确复刻 OkHttp 的 ClientHello。**
