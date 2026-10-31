@@ -1,4 +1,4 @@
-//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
+﻿//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
 //!
 //! 接口只有 5 个方法（browse / detail / replies / search / session_info），
 //! 调用者不需要知道 TokenV3、设备编码、Cookie 维护的任何细节。
@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::device::{self, constants, DeviceIdentity, DeviceProfile};
-use crate::error::{classify, Error};
-use crate::request::{build_headers, RequestContext, Session};
+use coolall_core::device::{constants, DeviceIdentity, DeviceProfile};
+use coolall_core::error::{classify, Error};
+use coolall_core::request::{build_headers, RequestContext, Session};
 
 /// 浏览目标。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +61,7 @@ pub struct CoolapkClient {
     identity: DeviceIdentity,
     session: Arc<Mutex<Session>>,
     /// 当前待完成的验证挑战
-    pending_challenge: Option<crate::error::CaptchaChallenge>,
+    pending_challenge: Option<coolall_core::error::CaptchaChallenge>,
     store_path: Option<std::path::PathBuf>,
 }
 
@@ -91,16 +91,23 @@ impl CoolapkClient {
 
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
-            .user_agent("coolall/0.1.0")
+            // 不设默认 UA：UA 由 request::build_headers 统一提供，
+            // 两个来源会导致实际发出的头不可预期。
             .build()?;
 
-        Ok(Self {
+        let client = Self {
             http,
             identity,
             session: Arc::new(Mutex::new(Session::default())),
             pending_challenge: None,
             store_path,
-        })
+        };
+
+        // 首次生成的设备标识必须立刻落盘。
+        // 否则每次启动都是新设备，会显著提高风控与重复验证概率。
+        client.persist();
+
+        Ok(client)
     }
 
     fn persist(&self) {
@@ -115,6 +122,52 @@ impl CoolapkClient {
         if let Ok(text) = serde_json::to_string_pretty(&cfg) {
             let _ = std::fs::write(path, text);
         }
+    }
+
+    /// 会话文件路径：与身份配置同目录。
+    fn session_path(&self) -> Option<std::path::PathBuf> {
+        self.store_path.as_ref().map(|p| p.with_file_name("session.json"))
+    }
+
+    /// 持久化 SESSID 与登录态。
+    ///
+    /// 注意：`validation` 凭证**不落盘**——它是短时效的人机验证结果，
+    /// 写入磁盘只会扩大泄露面。重启后重新验证即可。
+    async fn persist_session(&self) {
+        let Some(path) = self.session_path() else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let snapshot = {
+            let g = self.session.lock().await;
+            Session {
+                sessid: g.sessid.clone(),
+                validation: None,
+                uid: g.uid.clone(),
+                username: g.username.clone(),
+                token: g.token.clone(),
+            }
+        };
+        if let Ok(text) = serde_json::to_string_pretty(&snapshot) {
+            let _ = std::fs::write(path, text);
+        }
+    }
+
+    /// 启动时恢复上次的会话，避免每次都重建 SESSID。
+    ///
+    /// 由 Tauri 的 setup 钩子在运行时异步调用（`new()` 本身是同步的）。
+    pub async fn restore_session(&self) {
+        let Some(path) = self.session_path() else { return };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(mut saved) = serde_json::from_str::<Session>(&text) else {
+            return;
+        };
+        // 磁盘上不应存在 validation，稳妥起见清一次
+        saved.validation = None;
+        let mut g = self.session.lock().await;
+        *g = saved;
     }
 
     /// 发一次请求。内部完成头拼装、Cookie 回写、错误分类。
@@ -154,10 +207,23 @@ impl CoolapkClient {
             .map(str::to_string)
             .collect();
 
-        // 无论成功失败都要回写 SESSID
+        // 无论成功失败都要回写 SESSID，并在变化时持久化
         {
-            let mut guard = self.session.lock().await;
-            guard.update_from_set_cookie(&set_cookies);
+            let before = {
+                let g = self.session.lock().await;
+                g.sessid.clone()
+            };
+            {
+                let mut guard = self.session.lock().await;
+                guard.update_from_set_cookie(&set_cookies);
+            }
+            let after = {
+                let g = self.session.lock().await;
+                g.sessid.clone()
+            };
+            if before != after {
+                self.persist_session().await;
+            }
         }
 
         if status == reqwest::StatusCode::FORBIDDEN {
@@ -210,15 +276,25 @@ impl CoolapkClient {
         result
     }
 
-    /// 详情。API 失败且 id 为纯数字时，降级到公开分享页。
+    /// 详情。仅在「验证码 / 鉴权」失败且 id 为纯数字时，降级到公开分享页。
+    ///
+    /// 早期版本对任何错误都降级，会把限流、网络故障等真实问题掩盖成
+    /// 「内容不存在」。这里收紧为只处理 CAPTCHA 与 AUTH 两类，
+    /// 并保留原始挑战信息，便于前端走验证流程。
     pub async fn detail(&mut self, id: &str) -> Result<Value, Error> {
         let iid = urlencoding::encode(id);
         let path = format!("/v6/feed/detail?id={iid}");
         let result = self.send(constants::BASE_URL, &path).await;
+        self.track_challenge(&result);
+
         match result {
             Ok(v) => Ok(v),
             Err(primary) => {
-                if id.chars().all(|c| c.is_ascii_digit()) {
+                let degradable = matches!(
+                    primary,
+                    Error::CaptchaNeeded { .. } | Error::AuthRequired
+                );
+                if degradable && id.chars().all(|c| c.is_ascii_digit()) {
                     let public_url = format!("{}/feed/{}", constants::PUBLIC_URL, id);
                     if let Ok(resp) = self.http.get(&public_url).send().await {
                         if resp.status().is_success() {
@@ -253,25 +329,30 @@ impl CoolapkClient {
         })
     }
 
-    /// 接收前端完成验证后回传的 validate。
+    /// 接收前端完成验证后回传的 validate，拼装 proof 并写入会话。
     ///
-    /// 这里只处理**同步部分**：拼装 proof 并写入会话。
-    /// 备注：由于 Mutex 为异步锁，实际写入由调用方在 async 上下文中完成。
-    pub fn submit_validation(&mut self, challenge_id: &str, field: &str, validate: &str) -> bool {
-        let challenge = crate::error::CaptchaChallenge {
+    /// 写成 `async` 并 `await` 拿锁，而不是 `try_lock`：
+    /// 调用方（lib.rs 的命令）已经持有 `AppState.client` 的外层锁，
+    /// 内层 `session` 是独立的另一把锁，可以安全等待。
+    ///
+    /// 早期版本用 `try_lock()`，在并发下会返回 `WouldBlock`，
+    /// 把用户刚完成的验证凭证**静默丢弃**——这是必须避免的。
+    pub async fn submit_validation(
+        &self,
+        challenge_id: &str,
+        field: &str,
+        validate: &str,
+    ) -> bool {
+        let challenge = coolall_core::error::CaptchaChallenge {
             id: challenge_id.to_string(),
             field: field.to_string(),
         };
         let Some(proof) = challenge.proof(validate) else {
             return false;
         };
-        // 用阻塞方式拿到锁：该命令本身是同步命令，调用频率极低
-        if let Ok(mut guard) = self.session.try_lock() {
-            guard.accept_validation(proof);
-            true
-        } else {
-            false
-        }
+        let mut guard = self.session.lock().await;
+        guard.accept_validation(proof);
+        true
     }
 
     /// 导入 ShuzlmID 并持久化。
@@ -282,3 +363,4 @@ impl CoolapkClient {
         Ok(())
     }
 }
+

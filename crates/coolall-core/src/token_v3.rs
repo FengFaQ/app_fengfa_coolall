@@ -1,4 +1,4 @@
-//! 酷安 TokenV3 请求签名。
+﻿//! 酷安 TokenV3 请求签名。
 //!
 //! 算法结构见 `docs/PROTOCOL.md` §3。本实现独立于上游，仅按协议契约重写，
 //! 并与 `tools/verify_token_v3.py` 的输出逐字节交叉校验。
@@ -255,3 +255,4 @@ mod tests {
         assert_eq!(hex::encode(raw), "3e57b93c58b74050b16b81ba6e58b63f");
     }
 }
+

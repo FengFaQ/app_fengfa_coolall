@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { detail, replies, type FeedPage } from '../api'
+import { sanitizeHtml } from '../utils/sanitize'
 import ErrorBox from '../components/ErrorBox.vue'
 import LoadingList from '../components/LoadingList.vue'
 
@@ -17,6 +18,12 @@ const replyError = ref<unknown>(null)
 function str(v: unknown): string {
   return typeof v === 'string' ? v : typeof v === 'number' ? String(v) : ''
 }
+
+/// 公开页 HTML 来自外部站点，必须清洗后再渲染。
+/// 渲染环境持有 Tauri invoke，未清洗的 XSS 可越权调用后端命令。
+const safePublicHtml = computed(() =>
+  sanitizeHtml(str(content.value?.html)),
+)
 
 async function load() {
   const id = String(route.params.id ?? '')
@@ -57,7 +64,7 @@ onMounted(load)
         <div class="notice">
           该内容来自公开分享页，可能不完整。
         </div>
-        <div class="public-html" v-html="str(content.html)" />
+        <div class="public-html" v-html="safePublicHtml" />
       </template>
 
       <template v-else>

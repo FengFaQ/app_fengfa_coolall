@@ -29,6 +29,7 @@ impl CaptchaChallenge {
     /// 把用户拿到的 validate 拼成可回传的凭证。
     ///
     /// 校验：非空、长度 ≤ 8192、不含空白与控制字符。
+    /// 按 PROTOCOL.md §9.3，结果需要做 UTF-8 URL 编码后再使用。
     pub fn proof(&self, validate: &str) -> Option<String> {
         let ok = !validate.is_empty()
             && validate.len() <= 8192
@@ -37,7 +38,8 @@ impl CaptchaChallenge {
             return None;
         }
         let short: String = self.id.chars().take(8).collect();
-        Some(format!("NEC:{short}:{validate}"))
+        // NEC:{captchaId 前 8 位}:{validate}，再整体 URL 编码
+        Some(urlencoding::encode(&format!("NEC:{short}:{validate}")).into_owned())
     }
 
     /// 从响应体识别挑战。返回 None 表示不是挑战。
@@ -299,7 +301,9 @@ mod tests {
     fn proof_format() {
         let c = CaptchaChallenge::default();
         let p = c.proof("abc123").unwrap();
-        assert_eq!(p, "NEC:414e5c9b:abc123");
+        // proof 结果按 PROTOCOL.md §9.3 做 UTF-8 URL 编码，冒号编码为 %3A
+        assert_eq!(p, "NEC%3A414e5c9b%3Aabc123");
+        assert!(p.contains("%3A"), "冒号应被 URL 编码");
     }
 
     #[test]

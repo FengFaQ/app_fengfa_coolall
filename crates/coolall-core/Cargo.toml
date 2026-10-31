@@ -1,0 +1,22 @@
+[package]
+name = "coolall-core"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+description = "coolall 协议核心：签名、设备身份、请求头、错误分类（不含 GUI 依赖）"
+
+[lib]
+name = "coolall_core"
+path = "src/lib.rs"
+
+[dependencies]
+base64 = "0.22"
+md-5 = "0.10"
+hex = "0.4"
+bcrypt = "0.16"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+urlencoding = "2"
+chrono = "0.4"

@@ -44,3 +44,14 @@ tools/rs-probe/
 
 # Tauri 自动生成的 schema
 src-tauri/gen/
+
+# Rust 构建产物（workspace 根）
+target/
+crates/*/target/
+
+tools/s1-check/
+
+
+# 子 crate 不单独维护锁文件（由 workspace 根统一）
+crates/*/Cargo.lock
+

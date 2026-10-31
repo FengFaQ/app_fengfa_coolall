@@ -1,4 +1,4 @@
-//! coolall —— 非官方酷安客户端核心库
+﻿//! coolall —— 非官方酷安客户端核心库
 //!
 //! 模块划分见 `docs/ARCHITECTURE.md`。
 //!
@@ -9,18 +9,21 @@
 //! - [`client`]    对外的深模块接口
 
 pub mod client;
-pub mod device;
-pub mod error;
-pub mod request;
-pub mod token_v3;
 
-pub use error::Error;
-pub use token_v3::TokenError;
+// 协议核心从独立 crate 引入，避免与 GUI 依赖耦合
+pub use coolall_core::{device, error, request, token_v3};
 
-use std::sync::Mutex;
+pub use coolall_core::Error;
+pub use coolall_core::TokenError;
+
+use tokio::sync::Mutex;
 use tauri::State;
 
 /// 应用全局状态。
+///
+/// 使用 `tokio::sync::Mutex` 而非 `std::sync::Mutex`：
+/// 命令处理函数里需要在持锁期间 `.await` 网络请求，
+/// `std` 的守卫不满足 `Send`，会让 future 无法跨线程。
 pub struct AppState {
     pub client: Mutex<client::CoolapkClient>,
 }
@@ -62,7 +65,7 @@ pub async fn browse(
         let mut client = state
             .client
             .lock()
-            .map_err(|_| "内部状态锁失败".to_string())?;
+            .await;
         client.browse(&target, page).await
     };
     Ok(match outcome {
@@ -81,7 +84,7 @@ pub async fn detail(
         let mut client = state
             .client
             .lock()
-            .map_err(|_| "内部状态锁失败".to_string())?;
+            .await;
         client.detail(&id).await
     };
     Ok(match outcome {
@@ -101,7 +104,7 @@ pub async fn replies(
         let mut client = state
             .client
             .lock()
-            .map_err(|_| "内部状态锁失败".to_string())?;
+            .await;
         client.replies(&id, page).await
     };
     Ok(match outcome {
@@ -121,7 +124,7 @@ pub async fn search(
         let mut client = state
             .client
             .lock()
-            .map_err(|_| "内部状态锁失败".to_string())?;
+            .await;
         client.search(&keyword, page).await
     };
     Ok(match outcome {
@@ -132,17 +135,17 @@ pub async fn search(
 
 /// 当前会话状态（是否登录、是否有验证凭证）。
 #[tauri::command]
-pub fn session_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn session_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let client = state
         .client
         .lock()
-        .map_err(|_| "内部状态锁失败".to_string())?;
+        .await;
     Ok(client.session_info())
 }
 
 /// 提交人机验证结果。
 #[tauri::command]
-pub fn submit_validation(
+pub async fn submit_validation(
     state: State<'_, AppState>,
     challenge_id: String,
     field: String,
@@ -151,22 +154,25 @@ pub fn submit_validation(
     let mut client = state
         .client
         .lock()
-        .map_err(|_| "内部状态锁失败".to_string())?;
+        .await;
     Ok(client.submit_validation(&challenge_id, &field, &validate))
 }
 
 /// 导入 ShuzlmID 文本。
 #[tauri::command]
-pub fn import_shuzlm_id(state: State<'_, AppState>, text: String) -> Result<(), String> {
+pub async fn import_shuzlm_id(state: State<'_, AppState>, text: String) -> Result<(), String> {
     let mut client = state
         .client
         .lock()
-        .map_err(|_| "内部状态锁失败".to_string())?;
+        .await;
     client.import_shuzlm_id(&text)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // `manage` 来自 Manager trait，必须在作用域内
+    use tauri::Manager;
+
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
@@ -176,6 +182,15 @@ pub fn run() {
             let client = client::CoolapkClient::new(app.handle())?;
             app.manage(AppState {
                 client: Mutex::new(client),
+            });
+            // 恢复上次会话（SESSID / 登录态）。
+            // 必须放在 manage 之后，否则 try_state 取不到 AppState。
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(state) = handle.try_state::<AppState>() {
+                    let guard = state.client.lock().await;
+                    guard.restore_session().await;
+                }
             });
             Ok(())
         })
@@ -191,3 +206,6 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("启动 coolall 失败");
 }
+
+
+

@@ -1,0 +1,3 @@
+﻿[workspace]
+resolver = "2"
+members = ["crates/coolall-core", "src-tauri"]
