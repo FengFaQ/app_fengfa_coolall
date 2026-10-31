@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { ApiError, setPublicFallback } from '../api'
-import { extractValidate, submitCaptcha } from '../api/captcha'
+import {
+  closeCaptchaWindow,
+  completeCaptcha,
+  openCaptchaWindow,
+} from '../api/captcha'
 
 const props = defineProps<{
   error: unknown
@@ -14,12 +18,11 @@ const emit = defineEmits<{
   resolved: [data: Record<string, unknown>]
 }>()
 
-const validateText = ref('')
+const windowOpen = ref(false)
 const submitting = ref(false)
 const message = ref('')
 const failed = ref(false)
 
-/// 从后端错误里取出挑战信息
 const challenge = computed(() => {
   if (!(props.error instanceof ApiError)) return null
   const d = props.error.detail
@@ -34,29 +37,29 @@ function describe(err: unknown) {
   return { message: '发生未知错误', retryable: true }
 }
 
-async function submit() {
-  const c = challenge.value
-  if (!c) return
+/** 打开应用内嵌验证窗口。 */
+async function openWindow() {
   message.value = ''
   failed.value = false
-
-  const validate = extractValidate(validateText.value)
-  if (!validate) {
-    failed.value = true
-    message.value = '请先粘贴验证结果'
-    return
-  }
-
-  submitting.value = true
   try {
-    // 后端会立刻重放原请求，返回值就是重放结果
-    const data = await submitCaptcha({
-      challengeId: c.id,
-      field: c.field,
-      validate,
-    })
+    await openCaptchaWindow()
+    windowOpen.value = true
+    message.value = '请在弹出的窗口中完成验证，完成后点下方按钮'
+  } catch (e) {
+    failed.value = true
+    message.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+/** 用户点「我已完成验证」：后端读 Cookie 并重放。 */
+async function confirmDone() {
+  submitting.value = true
+  message.value = ''
+  failed.value = false
+  try {
+    const data = await completeCaptcha()
     message.value = '验证通过'
-    validateText.value = ''
+    windowOpen.value = false
     emit('resolved', data)
   } catch (e) {
     failed.value = true
@@ -66,13 +69,14 @@ async function submit() {
   }
 }
 
-/**
- * 用户放弃验证。
- *
- * 这里先开启公开页兜底再重试——否则重新请求仍会拿回 1004，
- * 用户会陷入「关掉对话框又弹出」的死循环。
- */
-async function dismiss() {
+/** 用户放弃验证，改为只看公开页。 */
+async function giveUp() {
+  try {
+    await closeCaptchaWindow()
+  } catch {
+    // 窗口可能已关闭，忽略
+  }
+  windowOpen.value = false
   try {
     await setPublicFallback(true)
   } catch {
@@ -80,49 +84,43 @@ async function dismiss() {
   }
   emit('dismiss')
 }
+
+onBeforeUnmount(() => {
+  // 组件卸载时关掉残留窗口，避免孤儿窗口
+  if (windowOpen.value) {
+    void closeCaptchaWindow().catch(() => {})
+  }
+})
 </script>
 
 <template>
   <div class="captcha-box">
-    <!-- 需要验证码时，给出明确的操作入口，而不是只说"需要验证" -->
     <template v-if="challenge">
-      <div class="icon">验证</div>
+      <div class="badge">验证</div>
       <p class="title">需要完成人机验证</p>
       <p class="hint">
-        酷安对未登录访问启用了安全验证。请点击下方按钮完成验证，
-        然后把结果粘贴回来。
+        酷安对未登录访问启用了安全验证。点击下方按钮，在应用内窗口完成验证，
+        完成后点「我已完成验证」，内容会自动加载。
       </p>
 
       <div class="actions">
-        <a
-          class="btn"
-          href="https://account.coolapk.com/auth/login?type=mobile"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          打开验证页面
-        </a>
+        <button class="btn btn-primary" @click="openWindow">
+          {{ windowOpen ? '重新打开验证窗口' : '打开验证窗口' }}
+        </button>
+        <button class="btn btn-primary" :disabled="submitting" @click="confirmDone">
+          {{ submitting ? '正在读取凭证…' : '我已完成验证' }}
+        </button>
       </div>
 
-      <textarea
-        v-model="validateText"
-        class="textarea"
-        rows="3"
-        placeholder="粘贴验证结果（或包含 validate=... 的整段内容）"
-      />
-
       <div class="actions">
-        <button class="btn btn-primary" :disabled="submitting" @click="submit">
-          {{ submitting ? '提交中…' : '提交并重试' }}
-        </button>
-        <button class="btn" @click="dismiss">放弃验证，只看公开页</button>
+        <button class="btn" @click="giveUp">放弃验证，只看公开页</button>
       </div>
 
       <p v-if="message" :class="failed ? 'err' : 'ok'">{{ message }}</p>
     </template>
 
     <template v-else>
-      <div class="icon">!</div>
+      <div class="badge danger">!</div>
       <p class="title">{{ describe(props.error).message }}</p>
       <div class="actions">
         <button
@@ -141,12 +139,14 @@ async function dismiss() {
 .captcha-box {
   padding: 36px 20px;
   text-align: center;
-  max-width: 520px;
+  max-width: 540px;
   margin: 0 auto;
 }
 
-.icon {
-  width: auto;
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 40px;
   height: 40px;
   padding: 0 12px;
@@ -154,11 +154,16 @@ async function dismiss() {
   border-radius: 20px;
   background: var(--accent);
   color: #fff;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   font-weight: 700;
   font-size: 14px;
+}
+
+.badge.danger {
+  background: var(--danger);
+  border-radius: 50%;
+  min-width: 40px;
+  padding: 0;
+  font-size: 20px;
 }
 
 .title {
@@ -169,26 +174,8 @@ async function dismiss() {
 .hint {
   color: var(--text-secondary);
   font-size: 13px;
-  margin-bottom: 16px;
+  margin-bottom: 18px;
   line-height: 1.7;
-}
-
-.textarea {
-  width: 100%;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  resize: vertical;
-  outline: none;
-  margin-bottom: 12px;
-}
-
-.textarea:focus {
-  border-color: var(--accent);
 }
 
 .actions {
@@ -203,10 +190,12 @@ async function dismiss() {
 .ok {
   color: var(--accent);
   font-size: 13px;
+  line-height: 1.6;
 }
 
 .err {
   color: var(--danger);
   font-size: 13px;
+  line-height: 1.6;
 }
 </style>

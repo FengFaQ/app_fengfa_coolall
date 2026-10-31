@@ -112,6 +112,71 @@ pub async fn import_shuzlm_id(
     client.import_shuzlm_id(&text)
 }
 
+/// 打开应用内嵌的验证窗口。
+///
+/// 不用外部浏览器：那是独立进程，Cookie 读不到，
+/// 用户只能手动复制粘贴，不可靠且凭证会经过剪贴板。
+#[tauri::command]
+pub async fn open_captcha_window(app: tauri::AppHandle) -> Result<(), String> {
+    crate::captcha_window::open_window(&app)
+}
+
+/// 关闭验证窗口。
+#[tauri::command]
+pub async fn close_captcha_window(app: tauri::AppHandle) -> Result<(), String> {
+    crate::captcha_window::close_window(&app);
+    Ok(())
+}
+
+/// 从验证窗口读取 Cookie 并提取 validate。
+///
+/// **必须是 async 命令**：Windows 上在同步命令里调用
+/// `WebviewWindow::cookies()` 会死锁（wry#583）。
+#[tauri::command]
+pub async fn read_captcha_validate(
+    app: tauri::AppHandle,
+) -> Result<crate::captcha_window::CookieReadResult, String> {
+    crate::captcha_window::read_validate(app).await
+}
+
+/// 用户确认已完成验证：读取凭证并立刻重放原请求。
+///
+/// 这是整条链路的收口——读 Cookie、写会话、重放、返回结果，一步完成。
+#[tauri::command]
+pub async fn complete_captcha(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<InvokeResult<serde_json::Value>, String> {
+    // 先读 Cookie（async，避免 Windows 死锁）
+    let read = crate::captcha_window::read_validate(app.clone()).await?;
+    let Some(validate) = read.validate else {
+        return Err(read.message);
+    };
+
+    let mut client = state.client.lock().await;
+
+    // 用当前待办挑战的 id/field 组装凭证并重放
+    let Some(pending) = client.pending_captcha().cloned() else {
+        return Err("当前没有待完成的验证".into());
+    };
+
+    let result = client
+        .submit_validation(&pending.id, &pending.field, &validate)
+        .await;
+
+    match result {
+        Ok(data) => {
+            // 成功后关闭验证窗口
+            crate::captcha_window::close_window(&app);
+            Ok(InvokeResult::success(data))
+        }
+        Err(message) => Ok(InvokeResult::failure(coolall_core::Error::Business {
+            status: 1004,
+            message,
+        })),
+    }
+}
+
 /// 设置是否允许公开页兜底。
 ///
 /// 前端在用户明确放弃人机验证时调用，随后重新请求详情。

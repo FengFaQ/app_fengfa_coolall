@@ -34,6 +34,7 @@ function describe(err: unknown) {
     @resolved="(d) => emit('resolved', d)"
   />
 
+
   <div v-else class="error-box">
     <div class="icon">!</div>
     <p class="message">{{ describe(error).message }}</p>

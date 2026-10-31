@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "captcha-window",
+  "description": "验证窗口只加载远程酷安页面，不需要任何本机能力。刻意不给任何 IPC 权限，避免远程页面获得应用能力。",
+  "windows": ["captcha"],
+  "permissions": []
+}

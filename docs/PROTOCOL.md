@@ -435,3 +435,34 @@ https://www.coolapk.com/feed/{id}
 - [TG-Twilight/c001apk](https://github.com/TG-Twilight/c001apk)：验证码与数盟流程的早期实现
 
 本项目对上述项目的协议理解做了独立重写与实测校验，未直接复制其源代码。
+
+### 9.6 桌面端实现：内嵌 WebView 窗口（2026-10-31 修订）
+
+**早期错误设计**：用外部浏览器打开验证页，让用户手动复制 validate 粘贴回来。
+**为什么错**：外部浏览器是独立进程，其 Cookie 归浏览器管，应用读不到；
+用户手动复制既不可靠，凭证还会经过剪贴板。
+
+**当前实现**：
+
+```
+用户点「打开验证窗口」
+  → Tauri WebviewWindowBuilder 创建 label="captcha" 的窗口
+  → 加载 https://account.coolapk.com/auth/login?type=mobile
+  → 用户在窗口内完成易盾验证
+用户点「我已完成验证」
+  → 后端调用 WebviewWindow::cookies() 读取全部 Cookie（含 HttpOnly）
+  → 用 extract_validate() 找出 validate 并做 URL 解码
+  → 组装 NEC:{id前8位}:{validate}，写入会话
+  → 立刻重放原请求，返回结果
+```
+
+**关键实现约束**：
+
+1. **`cookies()` 在 Windows 同步命令里会死锁**（wry#583）。
+   必须用 `async` 命令，并用 `tokio::task::spawn_blocking` 包裹读取。
+2. **验证窗口不给任何 IPC 权限**（`capabilities/captcha.json` 的 permissions 为空）。
+   它加载的是远程页面，不应获得应用能力。
+3. 凭证只在 Rust 内存中流转，**不经前端、不进日志、不落盘**。
+4. 窗口关闭时（组件卸载）要清理，避免孤儿窗口。
+
+**Tauri 版本要求**：`>= 2.12`（`cookies()` API 的稳定性见官方文档）。

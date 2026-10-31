@@ -1,4 +1,4 @@
-﻿//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
+//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
 //!
 //! 调用者不需要知道 TokenV3、设备编码、Cookie 维护的任何细节。
 //! 设计依据见 `docs/ARCHITECTURE.md`。
@@ -397,6 +397,14 @@ impl CoolapkClient {
                 Err(primary)
             }
         }
+    }
+
+    /// 当前待完成的验证挑战（若有）。
+    ///
+    /// 供 `complete_captcha` 命令使用：用户名在内嵌窗口完成验证后，
+    /// 后端需要用这个挑战的 id/field 组装凭证并重放原请求。
+    pub fn pending_captcha(&self) -> Option<&PendingCaptcha> {
+        self.pending_captcha.as_ref()
     }
 
     /// 设置是否允许公开页兜底。

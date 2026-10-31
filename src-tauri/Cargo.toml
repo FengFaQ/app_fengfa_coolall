@@ -44,6 +44,8 @@ tokio = { version = "1", features = ["full"] }
 
 chrono = "0.4"
 urlencoding = "2"
+# WebviewUrl::External 需要 url::Url
+url = "2"
 
 [features]
 default = ["custom-protocol"]
@@ -51,4 +53,6 @@ custom-protocol = ["tauri/custom-protocol"]
 
 # 注意：release profile 必须写在 workspace 根（见 ../../Cargo.toml），
 # 写在这里会被 cargo 忽略并发出警告。
+
+
 

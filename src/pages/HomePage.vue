@@ -98,6 +98,7 @@ function onResolved(data: Record<string, unknown>) {
       v-if="error && items.length === 0"
       :error="error"
       @retry="load(true)"
+      @dismiss="load(true)"
       @resolved="onResolved"
     />
 
@@ -114,6 +115,7 @@ function onResolved(data: Record<string, unknown>) {
             v-if="error && items.length > 0"
             :error="error"
             @retry="load(false)"
+            @dismiss="load(false)"
             @resolved="onResolved"
           />
 
@@ -149,4 +151,5 @@ h2 {
   padding: 14px 0;
 }
 </style>
+
 

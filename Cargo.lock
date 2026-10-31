@@ -482,6 +482,7 @@ dependencies = [
  "tauri-plugin-store",
  "thiserror 2.0.21",
  "tokio",
+ "url",
  "urlencoding",
 ]
 

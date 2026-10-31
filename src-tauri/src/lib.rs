@@ -1,4 +1,4 @@
-//! coolall —— 非官方酷安客户端
+﻿//! coolall —— 非官方酷安客户端
 //!
 //! 工程结构：
 //!
@@ -10,6 +10,7 @@
 //!
 //! 详细设计见 `docs/ARCHITECTURE.md`。
 
+pub mod captcha_window;
 pub mod client;
 pub mod commands;
 pub mod transport;
@@ -94,8 +95,14 @@ pub fn run() {
             commands::session_info,
             commands::submit_validation,
             commands::import_shuzlm_id,
-            commands::set_public_fallback
+            commands::set_public_fallback,
+            commands::open_captcha_window,
+            commands::close_captcha_window,
+            commands::read_captcha_validate,
+            commands::complete_captcha
         ])
         .run(tauri::generate_context!())
         .expect("启动 coolall 失败");
 }
+
+
