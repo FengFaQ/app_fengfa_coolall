@@ -196,16 +196,13 @@ pub fn classify(body: &Value) -> Option<Error> {
         return None;
     }
 
-    // 先识别验证码挑战
+    // 先识别真正的验证码挑战。
+    //
+    // 判定依据（对齐参考项目 CaptchaChallenge.from）：
+    // 必须收到 `messageStatus: "err_request_captcha_v2"`，
+    // 且带 captchaId / captchaField。
     if let Some(challenge) = CaptchaChallenge::from_body(body) {
         return Some(Error::CaptchaNeeded { challenge });
-    }
-
-    // 1004 是游客态的强制验证，与 err_request_captcha_v2 不同层
-    if status == Some(1004) {
-        return Some(Error::CaptchaNeeded {
-            challenge: CaptchaChallenge::default(),
-        });
     }
 
     if status == Some(-10) || clues.contains("网络环境") {
@@ -214,7 +211,13 @@ pub fn classify(body: &Value) -> Option<Error> {
     if marker == "err_request_need_upgrade_new_version" {
         return Some(Error::ClientUpgrade);
     }
-    if clues.contains("captcha") || clues.contains("验证码") || clues.contains("验证") {
+    // 注意：只匹配「验证码」这个完整词，不匹配「验证」。
+    //
+    // 早期实现把「验证」也当关键词，导致纯 `status:1004 请求验证错误`
+    // 被误判成人机验证挑战，进而拿兜底 captchaId 去初始化易盾——
+    // 那个 id 不是服务端下发的，初始化必然失败。
+    // 参考项目对 1004 走的是 BUSINESS 分支，不是 CAPTCHA。
+    if clues.contains("captcha") || clues.contains("验证码") {
         return Some(Error::CaptchaNeeded {
             challenge: CaptchaChallenge::default(),
         });
@@ -259,10 +262,21 @@ mod tests {
     }
 
     #[test]
-    fn status_1004_maps_to_captcha() {
+    fn status_1004_is_business_not_captcha() {
+        // 实测服务端返回的原文（59 字节）：
+        //   {"status":1004,"error":null,"message":"请求验证错误"}
+        //
+        // 它**不带** messageStatus / captchaId / captchaField，
+        // 所以不是人机验证挑战，而是普通业务错误。
+        //
+        // 参考项目 ApiFailure 对它的分类同样是 BUSINESS（走 else 分支），
+        // 因为 clues 里没有 "captcha" 也没有 "验证码"。
         let b = json!({"status": 1004, "error": null, "message": "请求验证错误"});
         let e = classify(&b).expect("应判定为失败");
-        assert!(matches!(e, Error::CaptchaNeeded { .. }), "实际: {e:?}");
+        assert!(
+            matches!(e, Error::Business { status: 1004, .. }),
+            "1004 应归为 BUSINESS，实际: {e:?}"
+        );
     }
 
     #[test]

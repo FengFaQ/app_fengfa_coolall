@@ -1,4 +1,4 @@
-//! Tauri 命令层。
+﻿//! Tauri 命令层。
 //!
 //! **为什么命令要单独放一个模块**：
 //! `#[tauri::command]` 会在模块级宏命名空间生成 `__cmd__{name}` 与
@@ -182,13 +182,13 @@ pub async fn complete_captcha(
 
     let Some(pending) = client.pending_captcha().cloned() else {
         return Ok(InvokeResult::failure(coolall_core::Error::Business {
-            status: 1004,
+            status: -1,
             message: "当前没有待完成的验证".into(),
         }));
     };
     let Some(validate) = client.take_staged_validate() else {
         return Ok(InvokeResult::failure(coolall_core::Error::Business {
-            status: 1004,
+            status: -1,
             message: "还没有收到验证结果，请先在验证窗口中完成验证".into(),
         }));
     };
@@ -221,3 +221,4 @@ pub async fn set_public_fallback(
     client.set_public_fallback(allow);
     Ok(())
 }
+

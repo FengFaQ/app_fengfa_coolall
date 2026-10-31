@@ -1,4 +1,4 @@
-//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
+﻿//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
 //!
 //! 调用者不需要知道 TokenV3、设备编码、Cookie 维护的任何细节。
 //! 设计依据见 `docs/ARCHITECTURE.md`。
@@ -278,7 +278,7 @@ impl CoolapkClient {
     ) -> Result<Value, Error> {
         if !self.replay_guard.may_replay() {
             return Err(Error::Business {
-                status: 1004,
+                status: -1,
                 message: "本次验证已重放过一次，请重新发起请求".into(),
             });
         }
@@ -479,13 +479,13 @@ impl CoolapkClient {
     ) -> Result<Value, Error> {
         let Some(pending) = self.pending_captcha.clone() else {
             return Err(Error::Business {
-                status: 1004,
+                status: -1,
                 message: "当前没有待完成的验证".into(),
             });
         };
         if !pending.matches(challenge_id) {
             return Err(Error::Business {
-                status: 1004,
+                status: -1,
                 message: "验证标识不匹配，请重新发起请求".into(),
             });
         }
@@ -495,7 +495,7 @@ impl CoolapkClient {
         };
         let Some(proof) = challenge.proof(validate) else {
             return Err(Error::Business {
-                status: 1004,
+                status: -1,
                 message: "验证结果格式不正确".into(),
             });
         };
@@ -543,7 +543,7 @@ impl CoolapkClient {
     ) -> Result<Value, Error> {
         if !self.replay_guard.may_replay() {
             return Err(Error::Business {
-                status: 1004,
+                status: -1,
                 message: "本次验证已重放过一次，请重新发起请求".into(),
             });
         }
@@ -937,6 +937,7 @@ mod tests {
         assert_eq!(BrowseTarget::parse("nope"), None);
     }
 }
+
 
 
 
