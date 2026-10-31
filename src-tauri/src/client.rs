@@ -1,4 +1,4 @@
-//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
+﻿//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
 //!
 //! 调用者不需要知道 TokenV3、设备编码、Cookie 维护的任何细节。
 //! 设计依据见 `docs/ARCHITECTURE.md`。
@@ -60,6 +60,8 @@ pub struct CoolapkClient {
     session: Arc<Mutex<Session>>,
     /// 当前待完成的验证挑战（含原 URL，供重放使用）
     pending_captcha: Option<PendingCaptcha>,
+    /// 是否允许公开页兜底。由前端在用户放弃验证时显式开启。
+    allow_public_fallback: bool,
     /// 重放守卫：保证每个验证流程只重放一次
     replay_guard: ReplayGuard,
     store_path: Option<std::path::PathBuf>,
@@ -98,6 +100,7 @@ impl CoolapkClient {
             identity,
             session: Arc::new(Mutex::new(Session::default())),
             pending_captcha: None,
+            allow_public_fallback: false,
             replay_guard: ReplayGuard::default(),
             store_path,
         };
@@ -394,9 +397,16 @@ impl CoolapkClient {
         match result {
             Ok(v) => Ok(v),
             Err(primary) => {
-                let degradable =
-                    matches!(primary, Error::CaptchaNeeded { .. } | Error::AuthRequired);
-                if degradable && id.chars().all(|c| c.is_ascii_digit()) {
+                // 只在「用户明确放弃验证」后才降级到公开页。
+                //
+                // 这是个刻意的顺序约束：如果一遇到 1004 就抓公开页，
+                // 用户永远看不到验证入口，也就永远不会真正通过验证，
+                // 后续所有请求都会继续 1004。必须先走验证链路。
+                let may_degrade = matches!(
+                    primary,
+                    Error::CaptchaNeeded { .. } | Error::AuthRequired
+                ) && self.allow_public_fallback;
+                if may_degrade && id.chars().all(|c| c.is_ascii_digit()) {
                     let public_url = format!("{}/feed/{}", constants::PUBLIC_URL, id);
                     if let Ok(resp) = self.http.get(&public_url).send().await {
                         if resp.status().is_success() {
@@ -413,6 +423,14 @@ impl CoolapkClient {
                 Err(primary)
             }
         }
+    }
+
+    /// 设置是否允许公开页兜底。
+    ///
+    /// 前端在用户放弃验证时调用 `set_public_fallback(true)` 再重新请求，
+    /// 这样「验证」与「降级」的顺序就由用户行为决定，而不是由错误码决定。
+    pub fn set_public_fallback(&mut self, allow: bool) {
+        self.allow_public_fallback = allow;
     }
 
     /// 记录挑战，供后续重放使用。
@@ -507,3 +525,4 @@ mod tests {
         assert_eq!(BrowseTarget::parse("nope"), None);
     }
 }
+

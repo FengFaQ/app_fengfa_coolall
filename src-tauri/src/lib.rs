@@ -89,7 +89,8 @@ pub fn run() {
             commands::search,
             commands::session_info,
             commands::submit_validation,
-            commands::import_shuzlm_id
+            commands::import_shuzlm_id,
+            commands::set_public_fallback
         ])
         .run(tauri::generate_context!())
         .expect("启动 coolall 失败");

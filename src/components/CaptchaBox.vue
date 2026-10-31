@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { ApiError } from '../api'
+import { ApiError, setPublicFallback } from '../api'
 import { extractValidate, submitCaptcha } from '../api/captcha'
 
 const props = defineProps<{
@@ -59,6 +59,21 @@ async function submit() {
     submitting.value = false
   }
 }
+
+/**
+ * 用户放弃验证。
+ *
+ * 这里先开启公开页兜底再重试——否则重新请求仍会拿回 1004，
+ * 用户会陷入「关掉对话框又弹出」的死循环。
+ */
+async function dismiss() {
+  try {
+    await setPublicFallback(true)
+  } catch {
+    // 开启失败也继续重试，最坏情况是再次看到本对话框
+  }
+  emit('dismiss')
+}
 </script>
 
 <template>
@@ -94,7 +109,7 @@ async function submit() {
         <button class="btn btn-primary" :disabled="submitting" @click="submit">
           {{ submitting ? '提交中…' : '提交并重试' }}
         </button>
-        <button class="btn" @click="emit('dismiss')">稍后再说</button>
+        <button class="btn" @click="dismiss">放弃验证，只看公开页</button>
       </div>
 
       <p v-if="message" :class="failed ? 'err' : 'ok'">{{ message }}</p>

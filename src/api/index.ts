@@ -119,3 +119,13 @@ export function submitValidation(
 export function importShuzlmId(text: string) {
   return invoke<void>('import_shuzlm_id', { text })
 }
+
+/**
+ * 设置是否允许公开页兜底。
+ *
+ * 只应在用户**明确放弃**人机验证时调用 true，随后重新请求详情。
+ * 不要一遇到验证码就自动降级——那样用户永远无法通过验证。
+ */
+export function setPublicFallback(allow: boolean) {
+  return invoke<void>('set_public_fallback', { allow })
+}

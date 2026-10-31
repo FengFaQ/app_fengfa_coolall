@@ -100,3 +100,18 @@ pub async fn import_shuzlm_id(
     let mut client = state.client.lock().await;
     client.import_shuzlm_id(&text)
 }
+
+/// 设置是否允许公开页兜底。
+///
+/// 前端在用户明确放弃人机验证时调用，随后重新请求详情。
+/// 这样「先验证、后降级」的顺序由用户行为决定，
+/// 而不是一遇到 1004 就静默降级——后者会让用户永远无法通过验证。
+#[tauri::command]
+pub async fn set_public_fallback(
+    state: State<'_, AppState>,
+    allow: bool,
+) -> Result<(), String> {
+    let mut client = state.client.lock().await;
+    client.set_public_fallback(allow);
+    Ok(())
+}
