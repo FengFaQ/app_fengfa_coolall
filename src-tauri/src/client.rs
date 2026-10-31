@@ -14,6 +14,8 @@ use coolall_core::device::{constants, DeviceIdentity, DeviceProfile};
 use coolall_core::error::{classify, Error};
 use coolall_core::request::{build_headers, RequestContext, Session};
 
+use crate::transport::{HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};
+
 /// 浏览目标。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowseTarget {
@@ -55,7 +57,7 @@ struct PersistedConfig {
 
 /// 对外客户端。
 pub struct CoolapkClient {
-    http: reqwest::Client,
+    http: Arc<dyn HttpTransport>,
     identity: DeviceIdentity,
     session: Arc<Mutex<Session>>,
     /// 当前待完成的验证挑战（含原 URL，供重放使用）
@@ -90,10 +92,7 @@ impl CoolapkClient {
             _ => DeviceIdentity::new(DeviceIdentity::random_szlm_id(), DeviceProfile::default()),
         };
 
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(20))
-            // 不设默认 UA：UA 由 request::build_headers 统一提供
-            .build()?;
+        let http: Arc<dyn HttpTransport> = Arc::new(ReqwestTransport::new()?);
 
         let client = Self {
             http,
@@ -193,40 +192,26 @@ impl CoolapkClient {
 
     /// 发一次请求。内部完成头拼装、Cookie 回写、错误分类。
     async fn send(&self, base: &str, path: &str) -> Result<Value, Error> {
-        let session = {
-            let guard = self.session.lock().await;
-            guard.clone()
-        };
-
-        let ctx = RequestContext {
-            identity: &self.identity,
-            session: &session,
-            dark_mode: false,
-            timestamp: chrono::Utc::now().timestamp(),
-        };
-
-        let headers = build_headers(&ctx).map_err(|e| Error::Parse {
-            message: e.to_string(),
-        })?;
-
         let url = format!("{base}{path}");
-        let mut req = self.http.get(&url);
-        for (k, v) in &headers {
-            req = req.header(k.as_str(), v.as_str());
-        }
+        let request = HttpRequest::get(url, self.headers_map().await);
 
-        let resp = req.send().await.map_err(|e| Error::Network {
-            message: e.to_string(),
-        })?;
+        let response = self
+            .http
+            .execute(request)
+            .await
+            .map_err(|error| Error::Network {
+                message: error.message,
+            })?;
 
-        let status = resp.status();
-        let set_cookies: Vec<String> = resp
-            .headers()
-            .get_all("set-cookie")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .map(str::to_string)
-            .collect();
+        self.process_response(response).await
+    }
+
+    /// 回写响应 Cookie，然后按 HTTP 状态与业务体分类。
+    ///
+    /// 所有响应（普通请求、Cookie 重放、QueryParam 重放）都走这里，
+    /// 避免出现某条路径忘记维护 SESSID 的不一致。
+    async fn process_response(&self, response: HttpResponse) -> Result<Value, Error> {
+        let set_cookies = response.set_cookies();
 
         // 回写 SESSID，变化时持久化
         let before = {
@@ -245,23 +230,7 @@ impl CoolapkClient {
             self.persist_session().await;
         }
 
-        if status == reqwest::StatusCode::FORBIDDEN {
-            return Err(Error::Http { status: 403 });
-        }
-        if !status.is_success() {
-            return Err(Error::Http {
-                status: status.as_u16(),
-            });
-        }
-
-        let body: Value = resp.json().await.map_err(|e| Error::Parse {
-            message: e.to_string(),
-        })?;
-
-        match classify(&body) {
-            Some(err) => Err(err),
-            None => Ok(body),
-        }
+        decode_response(&response)
     }
 
     /// 构造当前会话对应的请求头，供需要自定义 URL 的请求复用。
@@ -319,16 +288,16 @@ impl CoolapkClient {
                     return Err(Error::AuthRequired);
                 };
                 let url = pending.url_with_proof(&proof);
-                let resp = self
+                let request = HttpRequest::get(url, self.headers_map().await);
+                let response = self
                     .http
-                    .get(&url)
-                    .headers(self.headers_map().await)
-                    .send()
+                    .execute(request)
                     .await
-                    .map_err(|e| Error::Network {
-                        message: e.to_string(),
+                    .map_err(|error| Error::Network {
+                        message: error.message,
                     })?;
-                self.finish_response(resp).await
+                // 走统一处理，保证 QueryParam 模式也会回写 Set-Cookie
+                self.finish_response(response).await
             }
             ProofPlacement::Cookie => {
                 // Cookie 模式：走标准 send，会自动带上 session 里的 validate
@@ -348,27 +317,14 @@ impl CoolapkClient {
         result
     }
 
-    /// 处理已构造好的响应，失败时清除凭证。
-    async fn finish_response(&mut self, resp: reqwest::Response) -> Result<Value, Error> {
-        let status = resp.status();
-        if !status.is_success() {
+    /// 处理重放响应，失败时清除凭证。
+    async fn finish_response(&mut self, response: HttpResponse) -> Result<Value, Error> {
+        let result = self.process_response(response).await;
+        if result.is_err() {
             let mut g = self.session.lock().await;
             g.clear_validation();
-            return Err(Error::Http {
-                status: status.as_u16(),
-            });
         }
-        let body: Value = resp.json().await.map_err(|e| Error::Parse {
-            message: e.to_string(),
-        })?;
-        match classify(&body) {
-            Some(err) => {
-                let mut g = self.session.lock().await;
-                g.clear_validation();
-                Err(err)
-            }
-            None => Ok(body),
-        }
+        result
     }
 
     pub async fn browse(&mut self, target: &str, page: u32) -> Result<Value, Error> {
@@ -425,15 +381,16 @@ impl CoolapkClient {
                 ) && self.allow_public_fallback;
                 if may_degrade && id.chars().all(|c| c.is_ascii_digit()) {
                     let public_url = format!("{}/feed/{}", constants::PUBLIC_URL, id);
-                    if let Ok(resp) = self.http.get(&public_url).send().await {
-                        if resp.status().is_success() {
-                            if let Ok(html) = resp.text().await {
-                                return Ok(serde_json::json!({
-                                    "isPublic": true,
-                                    "sourceUrl": public_url,
-                                    "html": html,
-                                }));
-                            }
+                    // 公开页不需要协议头，用空头即可
+                    let request =
+                        HttpRequest::get(&public_url, reqwest::header::HeaderMap::new());
+                    if let Ok(response) = self.http.execute(request).await {
+                        if response.is_success() {
+                            return Ok(serde_json::json!({
+                                "isPublic": true,
+                                "sourceUrl": public_url,
+                                "html": response.text_body(),
+                            }));
                         }
                     }
                 }
@@ -512,12 +469,53 @@ impl CoolapkClient {
         }
     }
 
+    /// 测试构造入口：生产代码仍必须走 `new(AppHandle)`。
+    ///
+    /// 有了 transport seam 之后，测试可以注入 MockTransport，
+    /// 从而覆盖完整的「1004 → 验证 → 重放」链路，不需要 GUI 上下文。
+    #[cfg(test)]
+    fn with_test_transport(http: Arc<dyn HttpTransport>) -> Self {
+        Self {
+            http,
+            identity: DeviceIdentity::new(
+                "00000000000000000000000000000000",
+                DeviceProfile::default(),
+            ),
+            session: Arc::new(Mutex::new(Session::default())),
+            pending_captcha: None,
+            replay_guard: ReplayGuard::default(),
+            allow_public_fallback: false,
+            store_path: None,
+        }
+    }
+
     /// 导入 ShuzlmID 并持久化。
     pub fn import_shuzlm_id(&mut self, text: &str) -> Result<(), String> {
         let id = DeviceIdentity::parse_shuzlm_id(text)?;
         self.identity = DeviceIdentity::new(id, self.identity.profile.clone());
         self.persist();
         Ok(())
+    }
+}
+
+/// 把传输响应映射为业务结果。
+fn decode_response(response: &HttpResponse) -> Result<Value, Error> {
+    if response.status == 403 {
+        return Err(Error::Http { status: 403 });
+    }
+    if !response.is_success() {
+        return Err(Error::Http {
+            status: response.status,
+        });
+    }
+
+    let body = response.json_body().map_err(|error| Error::Parse {
+        message: error.to_string(),
+    })?;
+
+    match classify(&body) {
+        Some(error) => Err(error),
+        None => Ok(body),
     }
 }
 
@@ -532,6 +530,8 @@ fn split_url(url: &str) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock_transport::MockTransport;
+    use crate::transport::HttpMethod;
     use coolall_core::error::CaptchaChallenge;
 
     /// 测试专用构造：绕过 Tauri AppHandle，不落盘。
@@ -539,18 +539,200 @@ mod tests {
     /// 这正是「缺少 HttpTransport seam」的代价——真实构造需要 GUI 上下文。
     /// 这里只测与 HTTP 无关的纯状态逻辑。
     fn test_client() -> CoolapkClient {
-        CoolapkClient {
-            http: reqwest::Client::new(),
-            identity: DeviceIdentity::new(
-                "00000000000000000000000000000000",
-                DeviceProfile::default(),
-            ),
-            session: Arc::new(Mutex::new(Session::default())),
-            pending_captcha: None,
-            replay_guard: ReplayGuard::default(),
-            allow_public_fallback: false,
-            store_path: None,
-        }
+        CoolapkClient::with_test_transport(Arc::new(
+            ReqwestTransport::new().expect("创建测试 transport"),
+        ))
+    }
+
+    fn mock_client(mock: Arc<MockTransport>) -> CoolapkClient {
+        CoolapkClient::with_test_transport(mock)
+    }
+
+    const CHALLENGE_ID: &str = "abcdef0123456789";
+
+    fn captcha_body(field: &str) -> Value {
+        serde_json::json!({
+            "messageStatus": "err_request_captcha_v2",
+            "messageExtra": {
+                "captchaId": CHALLENGE_ID,
+                "captchaField": field
+            }
+        })
+    }
+
+    fn success_body() -> Value {
+        serde_json::json!({
+            "status": 1,
+            "data": { "id": 123, "title": "replay succeeded" }
+        })
+    }
+
+    /// 第一组：普通 200，验证协议头齐全且 SESSID 正确回写。
+    #[tokio::test]
+    async fn transport_success_reuses_headers_and_updates_sessid() {
+        let mock = Arc::new(MockTransport::new(vec![Ok(
+            HttpResponse::json(200, success_body())
+                .with_header("set-cookie", "SESSID=session-1; Path=/"),
+        )]));
+        let mut client = mock_client(mock.clone());
+
+        let value = client.detail("123").await.expect("普通 200 应成功");
+        assert_eq!(value["data"]["id"], 123);
+
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, HttpMethod::Get);
+        assert!(requests[0].url.ends_with("/v6/feed/detail?id=123"));
+
+        // 证明 transport 收到的是 build_headers 生成的完整协议头
+        assert!(requests[0].headers.contains_key("x-app-token"));
+        assert!(requests[0].headers.contains_key("x-app-device"));
+        assert!(requests[0].headers.contains_key("user-agent"));
+
+        let session = client.session.lock().await;
+        assert_eq!(session.sessid.as_deref(), Some("session-1"));
+    }
+
+    /// 第二组：1004 → QueryParam 验证 → 重放成功。
+    #[tokio::test]
+    async fn captcha_query_param_validation_replays_original_request() {
+        let mock = Arc::new(MockTransport::new(vec![
+            Ok(HttpResponse::json(200, captcha_body("_v2_post_token"))),
+            Ok(HttpResponse::json(200, success_body())),
+        ]));
+        let mut client = mock_client(mock.clone());
+
+        let error = client.detail("123").await.expect_err("第一次应要求验证");
+        assert!(matches!(error, Error::CaptchaNeeded { .. }));
+
+        let pending = client.pending_captcha.as_ref().expect("应保存原始挑战");
+        assert_eq!(
+            pending.original_url,
+            "https://api.coolapk.com/v6/feed/detail?id=123"
+        );
+
+        let value = client
+            .submit_validation(CHALLENGE_ID, "_v2_post_token", "proof")
+            .await
+            .expect("验证后应直接返回重放结果");
+        assert_eq!(value["data"]["title"], "replay succeeded");
+
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 2, "原请求一次，重放一次");
+        assert!(
+            requests[1]
+                .url
+                .contains("_v2_post_token=NEC%3Aabcdef01%3Aproof"),
+            "实际重放 URL：{}",
+            requests[1].url
+        );
+        assert!(requests[1].url.contains("id=123&"));
+
+        // 成功重放后保留凭证
+        let session = client.session.lock().await;
+        assert_eq!(
+            session.validation.as_deref(),
+            Some("NEC%3Aabcdef01%3Aproof")
+        );
+        assert!(!client.replay_guard.may_replay());
+    }
+
+    /// 第三组：重放仍失败 → 清除凭证，且不会有第三次请求。
+    #[tokio::test]
+    async fn rejected_replay_clears_proof_and_does_not_retry_again() {
+        let mock = Arc::new(MockTransport::new(vec![
+            Ok(HttpResponse::json(200, captcha_body("_v2_post_token"))),
+            Ok(HttpResponse::json(
+                200,
+                serde_json::json!({ "status": 1004, "message": "请求验证错误" }),
+            )),
+        ]));
+        let mut client = mock_client(mock.clone());
+
+        assert!(matches!(
+            client.detail("123").await,
+            Err(Error::CaptchaNeeded { .. })
+        ));
+
+        let error = client
+            .submit_validation(CHALLENGE_ID, "_v2_post_token", "bad-proof")
+            .await
+            .expect_err("重放仍被拒时必须返回错误");
+        assert!(error.contains("验证"), "实际错误：{error}");
+
+        // 每个挑战只消费一次重放机会，不允许隐式第三次请求
+        assert_eq!(mock.requests().len(), 2);
+        assert!(!client.replay_guard.may_replay());
+
+        let session = client.session.lock().await;
+        assert_eq!(session.validation, None, "重放失败后必须清除无效凭证");
+    }
+
+    /// 第四组：空 captchaField 走 Cookie 重放，不改 URL。
+    #[tokio::test]
+    async fn empty_captcha_field_replays_proof_in_cookie() {
+        let mock = Arc::new(MockTransport::new(vec![
+            Ok(HttpResponse::json(200, captcha_body(""))),
+            Ok(HttpResponse::json(200, success_body())),
+        ]));
+        let mut client = mock_client(mock.clone());
+
+        assert!(matches!(
+            client.detail("123").await,
+            Err(Error::CaptchaNeeded { .. })
+        ));
+
+        client
+            .submit_validation(CHALLENGE_ID, "", "cookie-proof")
+            .await
+            .expect("Cookie 模式重放应成功");
+
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].url,
+            "https://api.coolapk.com/v6/feed/detail?id=123",
+            "Cookie 模式不得修改原 URL"
+        );
+
+        let cookie = requests[1]
+            .headers
+            .get("cookie")
+            .expect("Cookie 模式必须带 Cookie")
+            .to_str()
+            .expect("Cookie 应为合法文本");
+        assert!(
+            cookie.contains("validate=NEC%3Aabcdef01%3Acookie-proof"),
+            "实际 Cookie：{cookie}"
+        );
+
+        let session = client.session.lock().await;
+        assert_eq!(
+            session.validation.as_deref(),
+            Some("NEC%3Aabcdef01%3Acookie-proof")
+        );
+    }
+
+    /// 挑战 ID 不匹配时不得写入凭证，也不得发请求。
+    #[tokio::test]
+    async fn mismatched_challenge_id_is_rejected_without_request() {
+        let mock = Arc::new(MockTransport::new(vec![Ok(HttpResponse::json(
+            200,
+            captcha_body("_v2_post_token"),
+        ))]));
+        let mut client = mock_client(mock.clone());
+
+        assert!(client.detail("123").await.is_err());
+
+        let error = client
+            .submit_validation("wrong-id", "_v2_post_token", "proof")
+            .await
+            .expect_err("挑战 ID 不匹配必须拒绝");
+        assert!(error.contains("不匹配"));
+
+        assert_eq!(mock.requests().len(), 1, "拒绝时不应发新请求");
+        let session = client.session.lock().await;
+        assert_eq!(session.validation, None);
     }
 
     #[test]
@@ -652,5 +834,7 @@ mod tests {
         assert_eq!(BrowseTarget::parse("nope"), None);
     }
 }
+
+
 
 

@@ -12,6 +12,10 @@
 
 pub mod client;
 pub mod commands;
+pub mod transport;
+
+#[cfg(test)]
+mod mock_transport;
 
 // 协议核心从独立 crate 引入，避免与 GUI 依赖耦合
 pub use coolall_core::{captcha, device, error, request, token_v3};

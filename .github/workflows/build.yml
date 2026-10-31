@@ -7,8 +7,13 @@ on:
   workflow_dispatch:
 
 concurrency:
+  # 注意：cancel-in-progress 只在 PR 上开启。
+  #
+  # 曾经全局开启，导致每次向 main 推送都会取消正在跑的构建——
+  # 而 Windows 打包要 10 分钟以上，连续提交时永远跑不完。
+  # main 分支改为排队（同组只保留最后排队者），保证总有一次能跑完。
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # 前端检查：类型检查 + 构建
