@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { ApiError, type BackendError } from './index'
 
 /**
  * 人机验证窗口。
@@ -16,25 +17,41 @@ export interface CaptchaRequest {
   validate: string
 }
 
-/**
- * 打开验证页面。
- *
- * 当前实现使用系统浏览器打开酷安登录页让用户完成验证，
- * 然后把拿到的 validate 字符串粘回来。
- *
- * 后续会替换为 Tauri 独立窗口 + 内嵌 WebView 自动回传。
- */
+interface InvokeResult<T> {
+  ok: boolean
+  data: T | null
+  error: BackendError | null
+}
+
+/** 打开酷安验证页的地址。 */
 export function captchaHelpUrl(): string {
   return 'https://account.coolapk.com/auth/login?type=mobile'
 }
 
-/** 提交验证结果给后端。challenge_id 不匹配时后端会拒绝。 */
-export async function submitCaptcha(req: CaptchaRequest): Promise<boolean> {
-  return invoke<boolean>('submit_validation', {
-    challengeId: req.challengeId,
-    field: req.field,
-    validate: req.validate,
-  })
+/**
+ * 提交验证结果。
+ *
+ * 后端会**立刻用凭证重放原请求**，返回重放得到的响应体。
+ * 调用方应直接用返回值渲染，而不是再发一次同样的请求——
+ * 那样会白白消耗一次重放机会。
+ */
+export async function submitCaptcha(
+  req: CaptchaRequest,
+): Promise<Record<string, unknown>> {
+  const res = await invoke<InvokeResult<Record<string, unknown>>>(
+    'submit_validation',
+    {
+      challengeId: req.challengeId,
+      field: req.field,
+      validate: req.validate,
+    },
+  )
+  if (!res.ok) {
+    throw new ApiError(
+      res.error ?? { kind: 'parse', message: '验证提交失败' },
+    )
+  }
+  return res.data ?? {}
 }
 
 /**

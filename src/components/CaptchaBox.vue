@@ -7,7 +7,12 @@ const props = defineProps<{
   error: unknown
 }>()
 
-const emit = defineEmits<{ retry: []; dismiss: [] }>()
+const emit = defineEmits<{
+  retry: []
+  dismiss: []
+  /** 验证成功并重放完成，携带重放得到的响应体 */
+  resolved: [data: Record<string, unknown>]
+}>()
 
 const validateText = ref('')
 const submitting = ref(false)
@@ -44,14 +49,15 @@ async function submit() {
 
   submitting.value = true
   try {
-    await submitCaptcha({
+    // 后端会立刻重放原请求，返回值就是重放结果
+    const data = await submitCaptcha({
       challengeId: c.id,
       field: c.field,
       validate,
     })
-    message.value = '验证已提交，正在重试…'
+    message.value = '验证通过'
     validateText.value = ''
-    emit('retry')
+    emit('resolved', data)
   } catch (e) {
     failed.value = true
     message.value = e instanceof Error ? e.message : String(e)

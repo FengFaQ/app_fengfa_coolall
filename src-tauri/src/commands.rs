@@ -77,18 +77,29 @@ pub async fn session_info(
     Ok(InvokeResult::success(client.session_info()))
 }
 
-/// 提交人机验证结果。
+/// 提交人机验证结果，**并重放原请求**。
+///
+/// 返回重放成功的响应体，前端拿到后可直接渲染，无需再发一次请求。
 #[tauri::command]
 pub async fn submit_validation(
     state: State<'_, AppState>,
     challenge_id: String,
     field: String,
     validate: String,
-) -> Result<bool, String> {
-    let client = state.client.lock().await;
-    client
+) -> Result<InvokeResult<serde_json::Value>, String> {
+    let mut client = state.client.lock().await;
+    match client
         .submit_validation(&challenge_id, &field, &validate)
         .await
+    {
+        Ok(data) => Ok(InvokeResult::success(data)),
+        Err(message) => Ok(InvokeResult::failure(
+            coolall_core::Error::Business {
+                status: 1004,
+                message,
+            },
+        )),
+    }
 }
 
 /// 导入 ShuzlmID 文本。

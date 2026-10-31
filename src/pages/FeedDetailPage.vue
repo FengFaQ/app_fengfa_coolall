@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { detail, replies, type FeedPage } from '../api'
@@ -48,6 +48,18 @@ async function load() {
 }
 
 onMounted(load)
+
+/**
+ * 验证通过并重放成功。
+ *
+ * 后端在重放时已经拿到了内容，直接用它渲染即可，
+ * 不要再发一次 detail 请求——那会白白多消耗一次请求，
+ * 而且若凭证是一次性的会立刻失效。
+ */
+function onResolved(data: Record<string, unknown>) {
+  content.value = data
+  error.value = null
+}
 </script>
 
 <template>
@@ -56,7 +68,7 @@ onMounted(load)
 
     <LoadingList v-if="loading" :count="2" />
 
-    <ErrorBox v-else-if="error" :error="error" @retry="load" />
+    <ErrorBox v-else-if="error" :error="error" @retry="load" @resolved="onResolved" />
 
     <template v-else-if="content">
       <!-- 公开页兜底：后端只返回 HTML -->
@@ -148,3 +160,4 @@ onMounted(load)
   overflow-x: auto;
 }
 </style>
+

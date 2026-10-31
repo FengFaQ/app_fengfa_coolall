@@ -7,7 +7,10 @@ const props = defineProps<{
   error: unknown
 }>()
 
-const emit = defineEmits<{ retry: [] }>()
+const emit = defineEmits<{
+  retry: []
+  resolved: [data: Record<string, unknown>]
+}>()
 
 /// 需要人机验证时，交给专用组件处理（它要展示操作入口与输入框）
 const needsCaptcha = computed(
@@ -28,6 +31,7 @@ function describe(err: unknown) {
     :error="error"
     @retry="emit('retry')"
     @dismiss="emit('retry')"
+    @resolved="(d) => emit('resolved', d)"
   />
 
   <div v-else class="error-box">

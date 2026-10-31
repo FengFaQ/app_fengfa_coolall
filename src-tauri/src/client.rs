@@ -1,4 +1,4 @@
-﻿//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
+//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
 //!
 //! 调用者不需要知道 TokenV3、设备编码、Cookie 维护的任何细节。
 //! 设计依据见 `docs/ARCHITECTURE.md`。
@@ -455,17 +455,22 @@ impl CoolapkClient {
         })
     }
 
-    /// 接收前端完成验证后回传的 validate。
+    /// 接收前端完成验证后回传的 validate，并**立刻重放原请求**。
+    ///
+    /// 这是验证链路真正闭合的地方：只存下凭证是不够的，
+    /// 必须用凭证把最初失败的那个请求重发一次，用户才能拿到内容。
     ///
     /// 参数校验：challenge_id 必须与当前待办一致，否则拒绝——
     /// 避免旧窗口或错误参数污染新会话。
+    ///
+    /// 返回：重放成功返回响应体；各类失败返回对应错误。
     pub async fn submit_validation(
-        &self,
+        &mut self,
         challenge_id: &str,
         field: &str,
         validate: &str,
-    ) -> Result<bool, String> {
-        let Some(pending) = self.pending_captcha.as_ref() else {
+    ) -> Result<Value, String> {
+        let Some(pending) = self.pending_captcha.clone() else {
             return Err("当前没有待完成的验证".into());
         };
         if !pending.matches(challenge_id) {
@@ -478,9 +483,16 @@ impl CoolapkClient {
         let Some(proof) = challenge.proof(validate) else {
             return Err("验证结果格式不正确".into());
         };
-        let mut guard = self.session.lock().await;
-        guard.accept_validation(proof);
-        Ok(true)
+        {
+            let mut guard = self.session.lock().await;
+            guard.accept_validation(proof);
+        }
+
+        // 写凭证后立刻重放，把最初失败的请求补上
+        match self.retry_after_validation(&pending).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(format!("{e}")),
+        }
     }
 
     /// 导入 ShuzlmID 并持久化。
@@ -503,6 +515,26 @@ fn split_url(url: &str) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coolall_core::error::CaptchaChallenge;
+
+    /// 测试专用构造：绕过 Tauri AppHandle，不落盘。
+    ///
+    /// 这正是「缺少 HttpTransport seam」的代价——真实构造需要 GUI 上下文。
+    /// 这里只测与 HTTP 无关的纯状态逻辑。
+    fn test_client() -> CoolapkClient {
+        CoolapkClient {
+            http: reqwest::Client::new(),
+            identity: DeviceIdentity::new(
+                "00000000000000000000000000000000",
+                DeviceProfile::default(),
+            ),
+            session: Arc::new(Mutex::new(Session::default())),
+            pending_captcha: None,
+            replay_guard: ReplayGuard::default(),
+            allow_public_fallback: false,
+            store_path: None,
+        }
+    }
 
     #[test]
     fn split_url_extracts_base_and_path() {
@@ -516,6 +548,84 @@ mod tests {
         let (b, p) = split_url("https://api2.coolapk.com/v6/main/indexV8?page=1");
         assert_eq!(b, "https://api2.coolapk.com");
         assert_eq!(p, "/v6/main/indexV8?page=1");
+    }
+
+    #[test]
+    fn public_fallback_defaults_to_off() {
+        // 关键安全默认值：默认不允许降级，否则用户永远看不到验证入口
+        assert!(!test_client().allow_public_fallback);
+    }
+
+    #[test]
+    fn public_fallback_can_be_toggled() {
+        let mut c = test_client();
+        c.set_public_fallback(true);
+        assert!(c.allow_public_fallback);
+        c.set_public_fallback(false);
+        assert!(!c.allow_public_fallback);
+    }
+
+    #[test]
+    fn captcha_error_records_pending_with_full_url() {
+        let mut c = test_client();
+        let challenge = CaptchaChallenge {
+            id: "abcdef0123456789".into(),
+            field: "_v2_post_token".into(),
+        };
+        let result: Result<Value, Error> = Err(Error::CaptchaNeeded {
+            challenge: challenge.clone(),
+        });
+        c.track_challenge(&result, "https://api.coolapk.com", "/v6/feed/detail?id=1");
+
+        let pending = c.pending_captcha.as_ref().expect("应记录挑战");
+        assert_eq!(pending.id, challenge.id);
+        assert_eq!(pending.field, challenge.field);
+        // 必须保存完整 URL 才能重放，只存 path 是不够的
+        assert_eq!(
+            pending.original_url,
+            "https://api.coolapk.com/v6/feed/detail?id=1"
+        );
+        assert!(c.replay_guard.may_replay());
+    }
+
+    #[test]
+    fn non_captcha_error_does_not_record_challenge() {
+        let mut c = test_client();
+        let result: Result<Value, Error> = Err(Error::Http { status: 403 });
+        c.track_challenge(&result, "https://api.coolapk.com", "/v6/x");
+        assert!(c.pending_captcha.is_none(), "非验证码错误不该记录挑战");
+    }
+
+    #[test]
+    fn concurrent_captcha_resets_replay_guard() {
+        // 一旦又遇到新挑战，重放机会应重置，否则用户第二次验证无法重放
+        let mut c = test_client();
+        c.replay_guard.consume();
+        assert!(!c.replay_guard.may_replay());
+
+        let result: Result<Value, Error> = Err(Error::CaptchaNeeded {
+            challenge: CaptchaChallenge::default(),
+        });
+        c.track_challenge(&result, "https://api.coolapk.com", "/v6/x");
+        assert!(c.replay_guard.may_replay(), "新挑战应重置重放机会");
+    }
+
+    #[test]
+    fn session_info_exposes_challenge_when_pending() {
+        let mut c = test_client();
+        let info = c.session_info();
+        assert!(info["challengeId"].is_null(), "无挑战时应为 null");
+
+        let result: Result<Value, Error> = Err(Error::CaptchaNeeded {
+            challenge: CaptchaChallenge {
+                id: "abcdef0123456789".into(),
+                field: "_v2_post_token".into(),
+            },
+        });
+        c.track_challenge(&result, "https://api.coolapk.com", "/v6/x");
+        let info = c.session_info();
+        assert_eq!(info["challengeId"], "abcdef0123456789");
+        assert_eq!(info["challengeField"], "_v2_post_token");
     }
 
     #[test]
