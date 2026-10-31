@@ -4,7 +4,181 @@
 
 ---
 
-# 轮次 2：run `41205566621`（commit `34fb069`）—— ⚠️ 首次跑通 Windows 打包，但编译失败
+# 轮次 3：run `41207794134`（commit `18dc442`）—— 🎉 exe 已成功产出，但被 workflow 路径 bug 吞掉
+
+> 诊断时间：2026-10-31T22:02+08:00（UTC 14:02）
+> 报告性质：只读诊断，未修改任何源码，未执行任何 push。
+
+## 重大结论先说
+
+**`coolall_0.1.0_x64-setup.exe` 已经成功构建出来了（2.62 MiB）。** 编译、链接、NSIS 打包**全部成功**。
+失败只发生在打包**之后**的 `列出产物` 步骤——一个 pwsh 路径写错的低级 bug，导致 job 判失败、`上传产物` 被 skip，成果被丢弃。
+
+**icon.ico 的猜测可以彻底排除了**：`makensis` 正常执行并产出 2.62 MiB 安装包，说明单尺寸 PNG 内嵌的 ico 完全被 NSIS 接受。
+
+## 运行概况
+
+| 项 | 值 |
+| --- | --- |
+| run id | `41207794134` |
+| commit | `18dc442` |
+| 状态 | `completed` / **failure** |
+| 起止 | 2026-10-31T13:56:08Z → 14:02:28Z（约 6 分 20 秒） |
+| 备注 | 本轮之前连续 3 个 run（`41206938833`@465c2b8、`41207140418`@2ae7de1、`41207561567`@b36cc0c）**全部被 `concurrency` 取消**，只有本 run 跑到终态 |
+
+## 各 Job 结果
+
+| Job | Job ID | 状态 | 耗时 | 失败 step |
+| --- | --- | --- | --- | --- |
+| 前端检查 | `124556351472` | ✅ success | 13:56:15 → 13:56:27（12s） | — |
+| Rust 测试 | `124556351675` | ✅ success | 13:56:15 → 13:56:41（26s） | — |
+| Windows 打包 | `124556448208` | ❌ failure | 13:56:45 → 14:02:25（5m40s） | **`[8] 列出产物`**；`[9] 上传产物` skipped |
+
+### Windows 打包 step 明细（关键）
+
+| # | Step | 结果 |
+| --- | --- | --- |
+| 6 | 安装前端依赖 | ✅ |
+| 7 | **构建**（`npm run tauri:build`） | ✅ **success** ← 首次真正通过！ |
+| 8 | **列出产物**（pwsh） | ❌ **failure** |
+| 9 | 上传产物 | ⏭ skipped |
+
+## 成功的那部分（构建日志原文）
+
+```
+Finished `release` profile [optimized] target(s) in 4m 53s
+   Built application at: D:\a\app_fengfa_coolall\app_fengfa_coolall\target\release\coolall.exe
+    Info Patching ...\target\release\coolall.exe with bundle type information: nsis
+Running makensis to produce ...\target\release\bundle\nsis\coolall_0.1.0_x64-setup.exe
+Finished 1 bundle at:
+    D:\a\app_fengfa_coolall\app_fengfa_coolall\target\release\bundle\nsis\coolall_0.1.0_x64-setup.exe (2.62 MiB)
+```
+
+**这说明**：E0255 修复完全生效、Rust release 全量编译通过、NSIS 打包器可用、icon.ico 合法。
+
+## 失败分析
+
+- **Job**：`Windows 打包`（`124556448208`）
+- **失败 step**：`[8] 列出产物`（`build.yml:97-101`）
+- **退出码**：1
+
+### 原始报错
+
+```
+Get-ChildItem: D:\a\_temp\f0916174-...-0e82e35cde45.ps1:2
+Line |
+   2 |  Get-ChildItem -Path src-tauri/target/release/bundle -Recurse -Include *.exe,*.msi |
+     |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Cannot find path 'D:\a\app_fengfa_coolall\app_fengfa_coolall\src-tauri\target\release\bundle' because it does not exist.
+##[error]Process completed with exit code 1.
+```
+
+### 根因
+
+**路径少了一层 workspace 根。** 真实产物在：
+
+```
+D:\a\app_fengfa_coolall\app_fengfa_coolall\target\release\bundle\nsis\coolall_0.1.0_x64-setup.exe
+└──────────────── workspace 根 ────────────────┘
+```
+
+而 workflow 里写的是 `src-tauri/target/release/bundle`。
+
+**为什么会这样**：本轮把 `[profile.release]` 从 `src-tauri/Cargo.toml` 移到了 workspace 根 `Cargo.toml:6-10`。Cargo 的规则是——**一旦 crate 成为 workspace 成员，构建产物统一放到 workspace 根的 `target/`**，不再使用成员目录下的 `target/`。所以 `src-tauri/target` 这条路径从本轮起永久失效。
+
+**而且 `Get-ChildItem` 对不存在的 `-Path` 默认抛 terminating error**（脚本 `$ErrorActionPreference='Stop'`），所以不是"列出空列表"，而是直接失败。
+
+### ⚠️ 连带问题：`上传产物` 的路径同样是错的
+
+`build.yml:107-110` 的三条 path 全部基于 `src-tauri/target/...`：
+
+```yaml
+path: |
+  src-tauri/target/release/bundle/nsis/*.exe
+  src-tauri/target/release/bundle/msi/*.msi
+  src-tauri/target/release/coolall.exe
+```
+
+即使把 `[8] 列出产物` 删掉或修好，`[9] 上传产物` 也会因为 `if-no-files-found: error`（`build.yml:111`）**匹配不到文件而再次失败**。**两处必须一起改。**
+
+### 修复建议（精确到文件行）
+
+**`build.yml:97-101`（列出产物）** —— 去掉 `src-tauri/` 前缀，并加容错：
+
+```yaml
+      - name: 列出产物
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path target/release/bundle -Recurse -Include *.exe,*.msi |
+            Select-Object FullName, @{N='MB';E={[math]::Round($_.Length/1MB,2)}}
+```
+
+**`build.yml:107-110`（上传产物）** —— 同样去掉 `src-tauri/` 前缀：
+
+```yaml
+          path: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+            target/release/coolall.exe
+```
+
+> `msi/*.msi` 这条可以保留——本轮没产 msi 是因为 `tauri.conf.json:33` 的 `targets` 只配了 `["nsis"]`。`upload-artifact` 对不匹配的单个 glob 不报错，只要整体至少匹配到一个文件即可。
+
+**更稳妥的做法（推荐）**：在 `build.yml` 的 `env:` 层显式固定 target 目录，让路径不受 workspace 重构影响：
+
+```yaml
+  build-windows:
+    runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+```
+
+这样路径始终是 `target/...`，与 workspace 结构解耦。
+
+## 产物清单
+
+| artifact | 大小 | 说明 |
+| --- | --- | --- |
+| `dist` | 63,351 bytes | 前端产物，id `13045027233` |
+| `coolall-windows` | **无** | ❌ 被 step 8 失败拦截，`上传产物` 未执行 |
+
+**实际已构建但未上传的产物**：
+
+| 文件 | 大小 | 路径 |
+| --- | --- | --- |
+| `coolall_0.1.0_x64-setup.exe` | **2.62 MiB** | `target/release/bundle/nsis/` |
+| `coolall.exe` | 未单独报告 | `target/release/coolall.exe` |
+
+> 这两个文件在 runner 上是真实存在的，只因路径写错没被收集，job 结束后随 runner 销毁。
+
+## 下一步
+
+修 `build.yml` 两处路径 → 重跑，应当 **全绿并产出 `coolall-windows` artifact**。这是最后一个已知阻塞点。
+
+## 建议：修一下 `concurrency` 配置（附带发现）
+
+连续 3 个 run 被取消，原因是 `build.yml:9-11`：
+
+```yaml
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+```
+
+对 `push` 到同一分支来说这通常是期望行为，但当前节奏下**每次推送都会掐掉上一次正在跑的打包**，而 Windows 打包已经要 5-6 分钟，导致很难拿到一次完整结果。建议改成按 commit 隔离：
+
+```yaml
+concurrency:
+  group: build-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+```
+
+或至少对 main 分支关闭 `cancel-in-progress`，让每次打包都能跑完。
+
+---
+---
+
+# 【历史】轮次 2：run `41205566621`（commit `34fb069`）—— 首次跑通 Windows 打包，但编译失败
 
 > 诊断时间：2026-10-31T21:32+08:00（UTC 13:31）
 > 报告性质：只读诊断，未修改任何源码，未执行任何 push。

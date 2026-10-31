@@ -57,14 +57,19 @@ export async function submitCaptcha(
 /**
  * 从用户粘贴的文本里提取 validate。
  *
- * 用户可能整段复制，这里做宽松提取：
- * - 优先取 `validate=xxx` 形式
- * - 否则把整段当作 validate（去掉空白）
+ * 用户可能整段复制 Cookie 串、URL 查询串，或只复制值本身。
+ * 这里做宽松但安全的提取：
+ *
+ * - `?validate=xxx&foo=1` / `; validate=xxx; path=/` → 取 xxx
+ * - `validate=xxx` 单独出现 → 取 xxx
+ * - 没有任何前缀 → 把整段（去空白）当作 validate
+ *
+ * 终止符要排除 `&` 和 `#`，否则会把后续参数一起吞进来。
  */
 export function extractValidate(text: string): string {
   const trimmed = text.trim()
   if (!trimmed) return ''
-  const m = /(?:^|[;\s])validate=([^;\s]+)/i.exec(trimmed)
+  const m = /(?:^|[;?\s])validate=([^;&\s#]+)/i.exec(trimmed)
   if (m) return m[1]
   return trimmed.replace(/\s+/g, '')
 }

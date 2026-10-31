@@ -23,4 +23,21 @@ describe('extractValidate', () => {
     expect(extractValidate('')).toBe('')
     expect(extractValidate('   ')).toBe('')
   })
+
+  it('URL 查询串形式不会吞掉后续参数', () => {
+    // 监督者指出的缺陷：早期正则会把 &foo=1 一起吞进去
+    expect(extractValidate('?validate=abc123&foo=1')).toBe('abc123')
+  })
+
+  it('问号起始也能识别', () => {
+    expect(extractValidate('?validate=xyz')).toBe('xyz')
+  })
+
+  it('井号锚点会截断', () => {
+    expect(extractValidate('validate=abc#frag')).toBe('abc')
+  })
+
+  it('Cookie 串中间的分号形式', () => {
+    expect(extractValidate('uid=1; validate=abc; path=/')).toBe('abc')
+  })
 })
