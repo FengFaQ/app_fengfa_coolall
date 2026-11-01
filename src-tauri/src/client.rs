@@ -40,9 +40,21 @@ impl BrowseTarget {
         }
     }
 
-    fn path(self, page: u32) -> String {
+    /// 构造请求路径。
+    ///
+    /// # 参数为什么这样传
+    ///
+    /// 对齐参考项目：
+    /// - `firstLaunch` 首次加载是 **1**（`BaseViewModel.kt:47` 的初始值），
+    ///   只有下拉刷新时才置 0（`HomeFeedViewModel.kt:72`）。
+    ///   早期实现固定写 0，等于每次都在伪装「刷新」而不是「首启」。
+    /// - `installTime` 是**真实的毫秒时间戳**，不是 0
+    ///   （`HomeFeedViewModel.kt:50-52` 首次为空时写入 `System.currentTimeMillis()`）。
+    fn path(self, page: u32, first_launch: u8, install_time: i64) -> String {
         match self {
-            Self::Home => format!("/v6/main/indexV8?page={page}&firstLaunch=0&installTime=0"),
+            Self::Home => format!(
+                "/v6/main/indexV8?page={page}&firstLaunch={first_launch}&installTime={install_time}"
+            ),
             Self::Feed => format!("/v6/feed/list?page={page}"),
         }
     }
@@ -53,6 +65,9 @@ impl BrowseTarget {
 struct PersistedConfig {
     szlm_id: String,
     profile: DeviceProfile,
+    /// 首次安装时间（毫秒时间戳）。参考项目会持久化并在每次请求带上。
+    #[serde(default)]
+    install_time: Option<i64>,
 }
 
 /// 对外客户端。
@@ -68,6 +83,8 @@ pub struct CoolapkClient {
     allow_public_fallback: bool,
     /// 重放守卫：保证每个验证流程只重放一次
     replay_guard: ReplayGuard,
+    /// 首次安装时间（毫秒）。参考项目持久化后每次请求带上。
+    install_time: i64,
     store_path: Option<std::path::PathBuf>,
 }
 
@@ -87,12 +104,23 @@ impl CoolapkClient {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|t| serde_json::from_str::<PersistedConfig>(&t).ok());
 
-        let identity = match persisted {
+        let identity = match &persisted {
             Some(cfg) if DeviceIdentity::valid_szlm_id(&cfg.szlm_id) => {
-                DeviceIdentity::new(cfg.szlm_id, cfg.profile)
+                DeviceIdentity::new(cfg.szlm_id.clone(), cfg.profile.clone())
             }
             _ => DeviceIdentity::new(DeviceIdentity::random_szlm_id(), DeviceProfile::default()),
         };
+
+        // 安装时间：沿用已存的值，没有则用当前时间戳并持久化。
+        let install_time = persisted
+            .as_ref()
+            .and_then(|c| c.install_time)
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0)
+            });
 
         let http: Arc<dyn HttpTransport> = Arc::new(ReqwestTransport::new()?);
 
@@ -104,6 +132,7 @@ impl CoolapkClient {
             staged_validate: None,
             allow_public_fallback: false,
             replay_guard: ReplayGuard::default(),
+            install_time,
             store_path,
         };
 
@@ -111,6 +140,11 @@ impl CoolapkClient {
         client.persist();
 
         Ok(client)
+    }
+
+    /// 首次安装时间（毫秒）。用于 `installTime` 查询参数。
+    fn install_time(&self) -> i64 {
+        self.install_time
     }
 
     fn persist(&self) {
@@ -125,6 +159,7 @@ impl CoolapkClient {
         let cfg = PersistedConfig {
             szlm_id: self.identity.szlm_id.clone(),
             profile: self.identity.profile.clone(),
+            install_time: Some(self.install_time),
         };
         match serde_json::to_string_pretty(&cfg) {
             Ok(text) => {
@@ -338,7 +373,10 @@ impl CoolapkClient {
             message: format!("未知浏览目标: {target}"),
         })?;
         let base = t.base_url();
-        let path = t.path(page.max(1));
+        // 首次加载 firstLaunch=1；翻页/刷新时为 0。
+        let first_launch = if page <= 1 { 1u8 } else { 0u8 };
+        let install_time = self.install_time();
+        let path = t.path(page.max(1), first_launch, install_time);
         let result = self.send(base, &path).await;
         self.track_challenge(&result, base, &path);
         result
@@ -609,6 +647,7 @@ impl CoolapkClient {
             replay_guard: ReplayGuard::default(),
             staged_validate: None,
             allow_public_fallback: false,
+            install_time: 1_761_926_400_000,
             store_path: None,
         }
     }
@@ -966,6 +1005,7 @@ mod tests {
         assert_eq!(BrowseTarget::parse("nope"), None);
     }
 }
+
 
 
 
