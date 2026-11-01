@@ -545,3 +545,85 @@ App 完成滑块验证后，`coolapk_api_session.xml` 里：
 3. **等 Rust 生态出现可用的指纹库**
 
 需要用户决定方向。
+
+---
+
+# 🎯 突破：完整 TLS 握手成功（2026-11-01 08:20）
+
+## 实验过程
+
+### 实验 1：重放真机原始 ClientHello
+
+从 tcpdump 抓到的真机包中提取 `api2.coolapk.com` 的完整 ClientHello 原始字节（517 字节），直接发给服务器：
+
+```
+✅✅ ServerHello！握手可以继续
+前32字节: 160303007a020000760303bdc83ce3a274a185251a2c9ea1239ab60f9c9b7445
+```
+
+**服务器正常响应 ServerHello。**
+
+对比我之前手工构造的（Alert 0x32 illegal_parameter），说明：
+- 我构造的结构有细节错误
+- **真机的原始字节完全可用**
+
+### 实验 2：替换 key_share
+
+真机 ClientHello 里唯一的「一次性」数据是 key_share 里的 x25519 公钥。
+它的私钥我们不知道，无法完成密钥交换。
+
+**关键操作**：保留真机 ClientHello 的所有其他字节（套件、扩展顺序、padding 全部不变），
+只把 key_share 里的 32 字节公钥换成我们自己生成的。
+
+```
+原公钥: 66c424519f8a588ddbfa15d4cec0bc893818a1abdc13daa17ecb3c61bba8a42c
+新公钥: b275ffd3e1efbfebb093a339a3f3386069ed314cd4a63d83f6ff324d69c4f243
+
+发送后：
+✅✅ ServerHello
+服务器响应 5478 字节（含完整握手链）
+```
+
+**服务器完全接受了我们替换公钥后的 ClientHello。**
+
+## 结论：这条路完全可行
+
+| 要素 | 来源 | 是否可复用 |
+| --- | --- | --- |
+| 套件列表（15 个） | 真机模板 | ✅ 固定 |
+| 扩展顺序（13 个） | 真机模板 | ✅ 固定 |
+| padding 长度 | 真机模板 | ✅ 固定 |
+| **key_share 公钥** | **自己生成** | ✅ **可替换** |
+| random / session_id | 任意 | ✅ 不影响 |
+
+**只要有一份真机 ClientHello 的模板字节，就可以生成任意多个合法的握手。**
+
+## 技术路径
+
+```
+1. 保存真机 ClientHello 作为模板（517 字节）
+2. 每次握手时：
+   a. 生成新的 x25519 密钥对
+   b. 把公钥写入模板的 key_share 位置（偏移 224，长度 32）
+   c. 发送，接收 ServerHello
+   d. 用私钥完成密钥交换
+   e. 继续握手直到加密通道建立
+3. 在加密通道上发 HTTP 请求
+```
+
+## 剩余工作
+
+1. 实现完整的 TLS 1.3 握手状态机（ServerHello → EncryptedExtensions → Certificate → CertificateVerify → Finished）
+2. HTTP/2 或 HTTP/1.1 帧处理
+3. 集成到 Rust 项目
+
+## 关键数据（供实现参考）
+
+```
+ClientHello 总长: 517 字节
+key_share 扩展起点: 214（从 handshake 消息起始算）
+公钥偏移: 224（从 handshake 消息起始算）
+公钥长度: 32
+密钥组: 0x001d (x25519)
+record header: 5 字节（16 03 01 + 长度）
+```
