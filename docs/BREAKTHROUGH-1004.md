@@ -847,3 +847,74 @@ if (failure != null) { throw failure }
 1. 实现登录流程（用户扫码/密码登录）
 2. 用 WebView 直接渲染酷安网页版（绕过 API）
 3. 等拿到真实的验证触发条件
+
+---
+
+# UWP 实现实测结果（2026-11-01 09:35）
+
+## 结论：UWP 的 TokenV3 实现不可用
+
+### 代码差异
+
+| 项 | C001 (Kotlin) | UWP (C#) |
+| --- | --- | --- |
+| password 输入 | `GetBase64(plain)` 去 padding | `GetBase64(plain, true)` **保留 padding** |
+| 盐末位 | `ALPHABET[(pos - 5) % 64]` | `ALPHABET[pos & 0x30]` |
+
+### 实测结果
+
+**C001 算法**：生成成功，请求返回 `1004 请求验证错误`
+
+**UWP 算法**：**16 次重试全部失败**，无法生成合法 token。
+
+原因：`pos & 0x30` 只能产生 4 种取值（0x00/0x10/0x20/0x30），
+其中 0x00 对应 `.`，0x30 对应 `a`，但 pool 里大量 pos 会落到非法值，
+导致 bcrypt 盐校验失败。
+
+**这个实现本身就有缺陷，不能作为参考。**
+
+### 结论
+
+UWP 仓库已弃用（用户确认），其 TokenV3 实现无法通过验证。
+C001 的实现是唯一正确的参考。
+
+## 但 C001 算法仍是 1004
+
+这说明：**问题不在 Token 算法，而在别的地方。**
+
+## 综合分析
+
+已排除的 14 个方向（含 UWP 算法）：
+
+1. IP/网络
+2. 设备串格式
+3. 数盟 ID
+4. SESSID
+5. 端点
+6. 请求头
+7. 协议版本
+8. HTTP 层
+9. installTime
+10. curl_cffi 浏览器指纹
+11. Chromium/WebView
+12. 手机 BoringSSL curl
+13. TLS 指纹完全对齐
+14. UWP TokenV3 算法
+
+## 唯一未验证的关键点
+
+**服务端 `err_request_captcha` 的触发条件。**
+
+代码分析已确认（ApiFailure.kt:89-101 + ApiFailureInterceptor）：
+只有 `messageStatus == "err_request_captcha"` 才会放行给验证拦截器。
+
+我们从不收到这个字段，所以从不弹验证。
+
+## 下一步（需要手机）
+
+必须抓包确认：
+1. App 打开动态时的**原始响应体**
+2. 是否有 `messageStatus` 字段
+3. 如果有，触发条件是什么（请求头？Cookie？特定操作？）
+
+没有这份数据，继续猜测没有意义。
