@@ -627,3 +627,140 @@ key_share 扩展起点: 214（从 handshake 消息起始算）
 密钥组: 0x001d (x25519)
 record header: 5 字节（16 03 01 + 长度）
 ```
+
+---
+
+# 🎯🎯 TLS 1.3 握手完全打通（2026-11-01 08:35）
+
+## 最终验证结果
+
+用真机 ClientHello 模板 + 自生成 key_share，完成完整 TLS 1.3 握手：
+
+```
+ClientHello: 517 字节
+植入公钥: 01d8f8c93e1e85c3f4b3c0c61677b58e...
+收到 5478 字节, 6 个 record
+套件 0x1302  hash=sha384  key_len=32
+服务端公钥: c3724828920d2c297602e40f33a7054f...
+
+✅ 握手密钥派生完成
+✅ record #1 解密成功 (26 字节)   -> EncryptedExtensions
+✅ record #2 解密成功 (4917 字节) -> Certificate
+✅ record #3 解密成功 (265 字节)  -> CertificateVerify
+✅ record #4 解密成功 (53 字节)   -> Finished
+```
+
+**服务端的全部握手消息都已成功解密。**
+
+## 实现要点（踩过的坑）
+
+| 坑 | 正确做法 |
+| --- | --- |
+| key_share 偏移 | record 内 **229**（含 5 字节 record header） |
+| 哈希算法 | 按协商套件选：0x1302 用 **SHA-384**，0x1301/0x1303 用 SHA-256 |
+| ServerHello 解析偏移 | session_id_len 在 **4+2+32=38** 位置（含 handshake header） |
+| transcript hash | 必须包含 **ClientHello + ServerHello 的完整 handshake 消息**（不含 record header） |
+| 密钥调度顺序 | `early_secret -> derived -> handshake_secret`，derived 的 ctx 用空串的哈希 |
+
+## 剩余步骤
+
+1. 发送 client Finished（用 c_hs_traffic 加密）
+2. 派生应用数据密钥（client/server application traffic）
+3. 在加密通道上发 HTTP GET /v6/main/indexV8
+4. **看返回 1004 还是 data**
+
+## 文件
+
+- `tools/tls-handshake3.py` —— 当前最完整的实现（握手 + 解密全通）
+
+## 意义
+
+这条路**技术上完全可行**。剩下的都是标准 TLS 1.3 流程，
+不需要任何特殊技巧。
+
+现在唯一的问题是：**握手成功后，业务层会不会放行**。
+
+---
+
+# 🔴 最终结论：TLS 指纹已完全对齐，但仍是 1004（2026-11-01 08:55）
+
+## 实验：完整 TLS 1.3 握手 + 真实 HTTP 请求
+
+用真机 ClientHello 模板（517 字节）+ 自生成 key_share，完整走完：
+
+```
+ServerHello: suite=0x1302 hash=sha384 key=32B
+✅ 服务端 Finished 校验: 通过
+✅ HTTP 请求发送成功
+✅ 响应解密成功
+
+HTTP/1.1 200 OK
+{"status":1004,"error":null,"message":"请求验证错误"}
+```
+
+**TLS 层完全通过，业务层仍然拒绝。**
+
+## 这意味着什么
+
+**TLS 指纹不是 1004 的原因。**
+
+之前的所有推断都被推翻了：
+- 不是 TLS 指纹（现已精确对齐，仍失败）
+- 不是设备串（用真机数据）
+- 不是 SESSID（用真机有效会话）
+- 不是请求头（15 个全对齐）
+- 不是网络出口（绕过代理测试）
+- 不是数盟 ID（用真实 ID）
+
+## 已排除方向的完整清单（13 项）
+
+| # | 方向 | 验证方式 | 结果 |
+| --- | --- | --- | --- |
+| 1 | IP/网络 | 绑定 WLAN 网卡 | 1004 |
+| 2 | 设备串格式 | 5 种形态 | 1004 |
+| 3 | 数盟 ID | 真实 ID（服务端签发） | 1004 |
+| 4 | SESSID | 真机有效会话 | 1004 |
+| 5 | 端点 | 5 个端点 | 1004 |
+| 6 | 请求头 | 逐个移除测试 | 1004 |
+| 7 | 协议版本 | 16.x / 13.x | 1004 / 403 |
+| 8 | HTTP 层 | gzip/HTTP1.1/keep-alive | 1004 |
+| 9 | installTime | 真实时间戳 | 1004 |
+| 10 | curl_cffi 浏览器指纹 | 7 种 | 1004 |
+| 11 | Chromium/WebView | Edge CDP | 403 |
+| 12 | 手机 BoringSSL curl | 同设备同库 | 1004 |
+| 13 | **TLS 指纹完全对齐** | **真机 ClientHello 模板 + 完整握手** | **1004** |
+
+## 唯一剩下的可能
+
+**App 在完成人机验证后，服务端会话状态发生了变化。**
+
+回顾关键事实：
+- 用户明确说：c001apk 打开时会弹人机验证，完成滑块后才能看内容
+- App 的 `coolapk_api_session.xml` 里只有 `session`，没有 `validation`
+- SESSID 前缀：api 域是 `a1-`，web 域是 `w1-`
+
+**推论**：验证不是通过某个 header 或 cookie 传递的，
+而是**服务端记录了「这个 SESSID 已经通过验证」的状态**。
+
+我们的 curl 拿到的 SESSID 从未经过验证，所以永远 1004。
+
+## 真正的解法
+
+必须**在 App 的 WebView 里完成人机验证**，拿到「已验证」的 SESSID，
+然后用这个 SESSID 发请求。
+
+但这又回到了「会话与客户端绑定」的问题——除非验证后的 SESSID 不再校验指纹。
+
+**需要用验证后的 SESSID 测试。** 这需要：
+1. 在 App 里触发验证并完成
+2. 立即读出 SESSID
+3. 用我们的客户端带这个 SESSID 发请求
+
+## 技术资产
+
+已经实现了完整的 TLS 1.3 客户端（Python）：
+- `tools/tls-probe/gen/tls13.py` —— 可复用的 TLS 1.3 实现
+- `tools/tls-probe/gen/probe.py` —— 端到端探针
+- 关键参数：sha384（0x1302）、key_share 偏移、transcript 计算
+
+如果后续需要，这套代码可以直接用于任何需要特定 TLS 指纹的场景。
