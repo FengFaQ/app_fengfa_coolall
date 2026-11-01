@@ -123,7 +123,8 @@ pub fn create(device: &str, app_code: i64, timestamp: i64) -> Result<String, Tok
         let segment = segment_for(remainder)?;
 
         let plain = format!("{APP_ID}&{segment}&{device_md5}&{t}&{app_code}");
-        let password = md5_hex(&b64_nopad(&plain));
+        // 密码输入使用带 padding 的 Base64；只有盐来源串去掉 padding。
+        let password = md5_hex(&STANDARD.encode(plain.as_bytes()));
 
         let source_full = b64_nopad(&format!("{t:x}/{}", md5_hex(&plain)));
         if source_full.len() < 22 {
@@ -172,9 +173,16 @@ mod tests {
     const APP_CODE: i64 = 2610291;
     const FIXED_TS: i64 = 1735689600;
 
-    /// 由 Python 参考实现 `tools/verify_token_v3.py` 算出，两边逐字节一致。
+    /// 由独立按仓库 1 `TokenV3.kt` 逐行重写的 Python 参考实现算出。
+    /// 注意：密码输入的 Base64 **必须保留 padding**。
     const EXPECTED: &str =
-        "v3JDJ5JDA0JE5qYzNORGcxT0RJdk1tUmpNVGM0TWVEUnRoSU1QZDdSbUk1MFBmWmg2TzlCeC9TMVc0WlhD";
+        "v3JDJ5JDA0JE5qYzNORGcxT0RJdk1tUmpNVGM0TWVHOHFMeXM5Y3pmYWdLaWoxMjZ6N2lKblVsRXFDd1lt";
+
+    #[test]
+    fn password_base64_keeps_padding() {
+        let token = create(DEVICE, APP_CODE, FIXED_TS).unwrap();
+        assert_eq!(token, EXPECTED, "password 的 Base64 应保留 padding");
+    }
 
     #[test]
     fn lookup_is_intact() {

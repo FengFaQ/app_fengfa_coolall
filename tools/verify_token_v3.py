@@ -126,7 +126,8 @@ def create(device: str, app_code: int = DEFAULT_APP_CODE, timestamp: int | None 
         segment = segment_for((t + app_code) % 100)
 
         plain = f"{APP_ID}&{segment}&{md5_hex(device)}&{t}&{app_code}"
-        password = md5_hex(b64_nopad(plain))
+        # 密码输入保留 Base64 padding；盐来源串才去掉 padding。
+        password = md5_hex(base64.b64encode(plain.encode("utf-8")).decode("ascii"))
         source = b64_nopad(f"{t:x}/{md5_hex(plain)}")[:22]
 
         pos = ALPHABET.index(source[21])
