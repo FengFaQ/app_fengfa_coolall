@@ -96,6 +96,17 @@ export function detail(id: string) {
   return call<Record<string, unknown>>('detail', { id })
 }
 
+/**
+ * 详情（用户主动重试，允许触发人机验证）。
+ *
+ * 对齐参考项目 FeedViewModel.refresh()：
+ * 首次打开失败不弹验证；用户看见错误后点重试，
+ * 才把请求标记为「允许验证」，让服务端下发的挑战变成验证窗口。
+ */
+export function detailWithCaptcha(id: string) {
+  return call<Record<string, unknown>>('detail_with_captcha', { id })
+}
+
 export function replies(id: string, page = 1) {
   return call<FeedPage>('replies', { id, page })
 }

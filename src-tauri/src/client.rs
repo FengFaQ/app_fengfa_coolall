@@ -1,4 +1,4 @@
-﻿//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
+//! 核心深模块：把签名、设备、请求头、会话、验证码、错误分类收拢在一个接口后面。
 //!
 //! 调用者不需要知道 TokenV3、设备编码、Cookie 维护的任何细节。
 //! 设计依据见 `docs/ARCHITECTURE.md`。
@@ -366,29 +366,58 @@ impl CoolapkClient {
         result
     }
 
-    /// 详情。仅在「验证码 / 鉴权」失败且 id 为纯数字时，降级到公开分享页。
+    /// 详情。对齐参考项目 `FeedViewModel.refresh()` 的两段式流程。
+    ///
+    /// # 为什么要两段
+    ///
+    /// 参考项目（`FeedViewModel.kt:321-341`）：
+    ///
+    /// ```text
+    /// 首次打开：fetchFeedData(verifyCaptcha = false)   // 不弹验证
+    ///   ↓ 失败
+    /// 用户重试：fetchFeedData(verifyCaptcha = true)    // 这次才走验证
+    /// ```
+    ///
+    /// 首次失败**不打扰用户**；只有用户在看见错误后主动重试，
+    /// 才把请求标记为「允许验证」。这样服务端下发的
+    /// `err_request_captcha_v2` 才会变成 `CaptchaNeeded`，前端才会弹滑块。
+    ///
+    /// 早期实现缺了这一环——我们从不「带验证重试」，
+    /// 所以即使服务端要求验证，我们也只是反复收到同一个错误。
     pub async fn detail(&mut self, id: &str) -> Result<Value, Error> {
+        self.detail_inner(id, false).await
+    }
+
+    /// 带验证重试的详情。由前端在用户主动重试时调用。
+    pub async fn detail_with_captcha(&mut self, id: &str) -> Result<Value, Error> {
+        self.detail_inner(id, true).await
+    }
+
+    async fn detail_inner(&mut self, id: &str, verify_captcha: bool) -> Result<Value, Error> {
         let iid = urlencoding::encode(id);
         let path = format!("/v6/feed/detail?id={iid}");
+
+        log::info!("详情 id={id} verify_captcha={verify_captcha}");
+
         let result = self.send(constants::BASE_URL, &path).await;
         self.track_challenge(&result, constants::BASE_URL, &path);
 
         match result {
             Ok(v) => Ok(v),
             Err(primary) => {
-                // 只在「用户明确放弃验证」后才降级到公开页。
-                //
-                // 这是个刻意的顺序约束：如果一遇到 1004 就抓公开页，
-                // 用户永远看不到验证入口，也就永远不会真正通过验证，
-                // 后续所有请求都会继续 1004。必须先走验证链路。
-                let may_degrade = matches!(
-                    primary,
-                    Error::CaptchaNeeded { .. } | Error::AuthRequired
-                ) && self.allow_public_fallback;
+                // 未开启验证时直接返回原始错误，由前端展示「重试」按钮。
+                if !verify_captcha {
+                    return Err(primary);
+                }
+
+                // 开启验证后，仅 CAPTCHA / AUTH 且 id 为纯数字时才降级公开页。
+                let may_degrade =
+                    matches!(primary, Error::CaptchaNeeded { .. } | Error::AuthRequired)
+                        && self.allow_public_fallback;
+
                 if may_degrade && id.chars().all(|c| c.is_ascii_digit()) {
                     log::info!("    降级到公开页 id={id}");
                     let public_url = format!("{}/feed/{}", constants::PUBLIC_URL, id);
-                    // 公开页不需要协议头，用空头即可
                     let request =
                         HttpRequest::get(&public_url, reqwest::header::HeaderMap::new());
                     if let Ok(response) = self.http.execute(request).await {

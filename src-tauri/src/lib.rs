@@ -1,4 +1,4 @@
-//! coolall —— 非官方酷安客户端
+﻿//! coolall —— 非官方酷安客户端
 //!
 //! 工程结构：
 //!
@@ -193,6 +193,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::browse,
             commands::detail,
+            commands::detail_with_captcha,
             commands::replies,
             commands::search,
             commands::session_info,
@@ -207,6 +208,7 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("启动 coolall 失败");
 }
+
 
 
 

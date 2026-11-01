@@ -1,0 +1,12 @@
+[package]
+name = "tokencli"
+version = "0.1.0"
+edition = "2021"
+
+# 独立于仓库根 workspace，避免被 members 检查
+[workspace]
+
+[dependencies]
+# 只读依赖：复用已交叉验证过的 TokenV3 实现，不修改它
+token-probe = { path = "../../rs-probe" }
+chrono = "0.4"

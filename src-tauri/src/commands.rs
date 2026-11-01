@@ -1,4 +1,4 @@
-﻿//! Tauri 命令层。
+//! Tauri 命令层。
 //!
 //! **为什么命令要单独放一个模块**：
 //! `#[tauri::command]` 会在模块级宏命名空间生成 `__cmd__{name}` 与
@@ -27,7 +27,7 @@ pub async fn browse(
     })
 }
 
-/// 内容详情。失败时自动尝试公开页兜底。
+/// 内容详情（首次打开，不触发验证）。
 #[tauri::command]
 pub async fn detail(
     state: State<'_, AppState>,
@@ -35,6 +35,22 @@ pub async fn detail(
 ) -> Result<InvokeResult<serde_json::Value>, String> {
     let mut client = state.client.lock().await;
     Ok(match client.detail(&id).await {
+        Ok(data) => InvokeResult::success(data),
+        Err(e) => InvokeResult::failure(e),
+    })
+}
+
+/// 内容详情（用户主动重试，允许触发人机验证）。
+///
+/// 对齐参考项目 `FeedViewModel.refresh()`：
+/// 首次失败不弹验证，用户点重试时才把 `verify_captcha` 置真。
+#[tauri::command]
+pub async fn detail_with_captcha(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<InvokeResult<serde_json::Value>, String> {
+    let mut client = state.client.lock().await;
+    Ok(match client.detail_with_captcha(&id).await {
         Ok(data) => InvokeResult::success(data),
         Err(e) => InvokeResult::failure(e),
     })

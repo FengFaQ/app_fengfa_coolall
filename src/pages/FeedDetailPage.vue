@@ -1,7 +1,7 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { detail, replies, type FeedPage } from '../api'
+import { detail, detailWithCaptcha, replies, type FeedPage } from '../api'
 import { sanitizeHtml } from '../utils/sanitize'
 import ErrorBox from '../components/ErrorBox.vue'
 import LoadingList from '../components/LoadingList.vue'
@@ -25,20 +25,35 @@ const safePublicHtml = computed(() =>
   sanitizeHtml(str(content.value?.html)),
 )
 
-async function load() {
+/**
+ * 加载详情。
+ *
+ * `verifyCaptcha` 对齐参考项目 FeedViewModel.refresh() 的两段式：
+ * - 首次打开传 false：失败直接报错，不打扰用户
+ * - 用户点「重试」传 true：允许触发人机验证
+ *
+ * 这样服务端下发的挑战才会变成验证窗口，而不是一直被当成普通错误。
+ */
+async function load(verifyCaptcha = false) {
   const id = String(route.params.id ?? '')
   loading.value = true
   error.value = null
   replyError.value = null
   try {
-    content.value = await detail(id)
-    try {
-      const r = await replies(id, 1)
-      replyList.value = Array.isArray((r as FeedPage).data)
-        ? ((r as FeedPage).data as Array<Record<string, unknown>>)
-        : []
-    } catch (e) {
-      replyError.value = e
+    content.value = verifyCaptcha
+      ? await detailWithCaptcha(id)
+      : await detail(id)
+
+    // 公开页兜底时没有评论，跳过
+    if (!content.value?.isPublic) {
+      try {
+        const r = await replies(id, 1)
+        replyList.value = Array.isArray((r as FeedPage).data)
+          ? ((r as FeedPage).data as Array<Record<string, unknown>>)
+          : []
+      } catch (e) {
+        replyError.value = e
+      }
     }
   } catch (e) {
     error.value = e
@@ -47,7 +62,12 @@ async function load() {
   }
 }
 
-onMounted(load)
+/** 用户点重试：这次允许触发人机验证。 */
+function retryWithCaptcha() {
+  void load(true)
+}
+
+onMounted(() => load(false))
 
 /**
  * 验证通过并重放成功。
@@ -68,7 +88,7 @@ function onResolved(data: Record<string, unknown>) {
 
     <LoadingList v-if="loading" :count="2" />
 
-    <ErrorBox v-else-if="error" :error="error" @retry="load" @resolved="onResolved" />
+    <ErrorBox v-else-if="error" :error="error" @retry="retryWithCaptcha" @resolved="onResolved" />
 
     <template v-else-if="content">
       <!-- 公开页兜底：后端只返回 HTML -->
@@ -92,7 +112,7 @@ function onResolved(data: Record<string, unknown>) {
         </article>
 
         <h3 class="section-title">评论</h3>
-        <ErrorBox v-if="replyError" :error="replyError" @retry="load" />
+        <ErrorBox v-if="replyError" :error="replyError" @retry="retryWithCaptcha" />
         <template v-else>
           <div v-for="(r, i) in replyList" :key="i" class="card reply">
             <header class="meta">
@@ -160,4 +180,5 @@ function onResolved(data: Record<string, unknown>) {
   overflow-x: auto;
 }
 </style>
+
 
