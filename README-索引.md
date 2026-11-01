@@ -14,17 +14,39 @@
 
 ---
 
-## 当前状态（2026-10-31 22:15）
+## 🎉 关键里程碑（2026-11-01）
+
+**首次拿到真实首页数据，1004 已解决。**
+
+```
+[真机 + indexV8] HTTP 200 OK -> ✅ 成功！ 长度 221718
+[真机 + indexV8] HTTP 200 OK -> ✅ 成功！ 长度 212200   （二次复现）
+```
+
+**根因**：TokenV3 密码输入的 Base64 被我错误地去掉 padding。
+仓库 1 里 `password` 用 `encoder.encodeToString`（保留 `=`），
+只有 `source` 串才用 `withoutPadding`。
+
+**提交**：`336638d 修复根因：TokenV3 密码输入的 Base64 必须保留 padding`
+
+详见 [`00-记忆与交接/08-代码现状与验证结果.md`](00-记忆与交接/08-代码现状与验证结果.md)。
+
+---
+
+## 当前状态（2026-11-01 10:20）
 
 | 项 | 状态 |
 | --- | --- |
-| 协议层（签名/设备/请求/错误） | ✅ 47 项测试通过 |
-| 验证码链路（识别→记录→提交→重放→清理） | ✅ 已闭合，14 项含 5 组集成测试 |
-| 前端（首页/搜索/详情/设置 + 验证码 UI） | ✅ 33 项测试通过 |
-| Windows 打包 | ⏳ 构建已成功过一次（2.62 MiB），产物收集修复后重跑中 |
+| TokenV3 签名 | ✅ **已修正 padding，实测通过** |
+| 首页接口 | ✅ **返回 212~222 KB 真实数据** |
+| 协议层测试 | ✅ 53 项通过 |
+| 前端 | ✅ 类型检查 / 33 项测试通过 |
+| Windows 打包 | ✅ CI 连续成功（产物 6.19 MiB） |
+| 客户端显示首页 | ⏳ 待重新构建验证 |
 | Android / Linux | ⏸ 未开始 |
+| UI 改造（coolwin + WinUI 3） | ⏸ 用户要求跑通后进行 |
 
-**最近推送**：`aa0a1db`（图标更换 + 首页接线修复）
+**最近提交**：`336638d`（根因修复）
 
 ---
 
@@ -43,19 +65,23 @@ Kuan/                              ← 项目根
 │   ├─ 03-环境与凭据.md            工具链、SSH、Token、网络事实
 │   ├─ 04-交接-下一任必读.md        接手行动清单
 │   ├─ 05-构建与 CI 实录.md         CI 失败与修复的完整记录
+│   ├─ 06-完整对话与决策归档.md     ⭐ 与用户的全部交流、决策变更
+│   ├─ 07-1004攻坚全记录.md         ⭐ 14 个排除方向与根因
+│   ├─ 08-代码现状与验证结果.md     ⭐ 成功请求参数与响应
 │   └─ 历史handoff/                按轮次归档的交接快照
 │
 ├─ crates/
 │   └─ coolall-core/               ← 协议核心，不依赖 GUI
-│       ├─ src/token_v3.rs         请求签名
+│       ├─ src/token_v3.rs         请求签名（已修正 padding）
 │       ├─ src/device.rs           设备身份编码与 UA
 │       ├─ src/request.rs          请求头拼装与会话
 │       ├─ src/error.rs            错误分类与验证码识别
-│       └─ src/captcha.rs          验证码状态机
+│       ├─ src/captcha.rs          验证码状态机
+│       └─ src/shuzilm.rs          数盟设备 ID 获取
 │
 ├─ src-tauri/                      ← 桌面外壳
 │   ├─ src/lib.rs                  应用入口、状态定义
-│   ├─ src/commands.rs             8 个 Tauri 命令
+│   ├─ src/commands.rs             Tauri 命令
 │   ├─ src/client.rs               核心客户端（HTTP/会话/重放）
 │   ├─ src/transport.rs            HTTP seam
 │   ├─ src/mock_transport.rs       测试用 transport
