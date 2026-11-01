@@ -764,3 +764,86 @@ HTTP/1.1 200 OK
 - 关键参数：sha384（0x1302）、key_share 偏移、transcript 计算
 
 如果后续需要，这套代码可以直接用于任何需要特定 TLS 指纹的场景。
+
+---
+
+# 最终定位：验证弹窗的触发条件（2026-11-01 09:20）
+
+## 决定性代码分析
+
+### 拦截器执行顺序（NetworkModule.kt:108-118）
+
+```kotlin
+.addInterceptor(RequestSession.capture)
+.addInterceptor(ApiFailureInterceptor())    // ← 先执行
+.addInterceptor(CaptchaInterceptor())       // ← 后执行
+.addNetworkInterceptor(AddCookiesInterceptor)
+```
+
+### ApiFailureInterceptor 的判定（ApiFailure.kt:89-101）
+
+```kotlin
+// 只有这一种情况放行给 CaptchaInterceptor
+if (body.get("messageStatus")?.asString == "err_request_captcha") {
+    return response
+}
+// 其他所有失败都抛异常，CaptchaInterceptor 收不到响应
+val failure = ApiFailures.fromBody(body)
+if (failure != null) { throw failure }
+```
+
+**结论：只有 `messageStatus == "err_request_captcha"` 才会弹滑块。**
+
+### 我们收到的响应
+
+```json
+{"status":1004,"error":null,"message":"请求验证错误"}
+```
+
+- 没有 `messageStatus` 字段
+- 因此不会命中放行条件
+- 因此永远不会弹滑块
+
+## 「err_request_captcha」出现的位置
+
+全仓搜索确认，只在两处：
+
+| 文件 | 行 | 场景 |
+| --- | --- | --- |
+| ReplyViewModel.kt | 52 | 发评论 |
+| ReplyViewModel.kt | 129 | 发回复 |
+| ReplyActivity.kt | 601 | 请求验证参数（配合 code/mobile/idcard 字段） |
+
+这些都带 `requestValidateData["type"] = "err_request_captcha"`，
+且伴随**账号验证字段**（验证码、手机号、身份证）。
+
+## 推论
+
+1. `err_request_captcha` 是**账号级验证**，不是浏览级
+2. 用户描述的「点开动态弹滑块」可能是：
+   - 登录态相关的引导
+   - 或者触发了 app 内 webview 的验证
+3. 我们纯游客 + 无登录态，服务端只返回 1004，不给验证入口
+
+## 当前真实的阻塞
+
+**不是 UI，不是 TLS，不是设备串，而是：**
+服务端不给我们 `err_request_captcha`，所以我们连验证的机会都没有。
+
+## 待验证（需要手机）
+
+必须抓包对比 App 打开动态时的真实响应体，
+看它是否真的包含 `messageStatus: err_request_captcha`。
+
+如果包含 → 找出触发条件
+如果不包含 → 用户的滑块来自别的路径（如登录流程）
+
+## 阶段 1 的现实结论
+
+在当前条件下（游客、无登录），**API 无法返回内容**。
+这是服务端策略，不是实现缺陷。
+
+可选路径：
+1. 实现登录流程（用户扫码/密码登录）
+2. 用 WebView 直接渲染酷安网页版（绕过 API）
+3. 等拿到真实的验证触发条件
