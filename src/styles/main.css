@@ -125,6 +125,32 @@ button {
   color: var(--text-secondary);
 }
 
+/* 富文本渲染：酷安 [表情] / 图片占位 / 文字徽标 */
+.ck-emoji {
+  height: 1.25em;
+  width: auto;
+  vertical-align: -0.22em;
+  display: inline-block;
+}
+
+.ck-photo {
+  display: inline-block;
+  font-size: 1.1em;
+  vertical-align: middle;
+}
+
+.ck-badge {
+  display: inline-block;
+  padding: 0 4px;
+  margin: 0 1px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--accent);
+  font-size: 0.78em;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
 .skeleton {
   height: 88px;
   border-radius: var(--radius);

@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { detail, detailWithCaptcha, replies, type FeedPage } from '../api'
-import { sanitizeHtml } from '../utils/sanitize'
+import { renderRichText } from '../utils/richtext'
 import ErrorBox from '../components/ErrorBox.vue'
 import LoadingList from '../components/LoadingList.vue'
 
@@ -19,11 +19,14 @@ function str(v: unknown): string {
   return typeof v === 'string' ? v : typeof v === 'number' ? String(v) : ''
 }
 
-/// 公开页 HTML 来自外部站点，必须清洗后再渲染。
+/// 公开页 HTML 来自外部站点，必须清洗并解析表情后再渲染。
 /// 渲染环境持有 Tauri invoke，未清洗的 XSS 可越权调用后端命令。
 const safePublicHtml = computed(() =>
-  sanitizeHtml(str(content.value?.html)),
+  renderRichText(str(content.value?.html)),
 )
+
+/// 正文与评论的消息文本走富文本渲染：解析 [表情] token 与内嵌图片。
+const richContent = computed(() => renderRichText(str(content.value?.message)))
 
 /**
  * 加载详情。
@@ -120,7 +123,7 @@ async function onResolved(data: Record<string, unknown>) {
           <h1 v-if="str(content.title)" class="title">
             {{ str(content.title) }}
           </h1>
-          <p class="body">{{ str(content.message) }}</p>
+          <div class="body" v-html="richContent"></div>
         </article>
 
         <h3 class="section-title">评论</h3>
@@ -131,7 +134,7 @@ async function onResolved(data: Record<string, unknown>) {
               <span class="user">{{ str(r.username) || '匿名' }}</span>
               <span class="muted">{{ str(r.dateline) }}</span>
             </header>
-            <p class="body">{{ str(r.message) }}</p>
+            <div class="body" v-html="renderRichText(str(r.message))"></div>
           </div>
           <div v-if="replyList.length === 0" class="state">还没有评论</div>
         </template>

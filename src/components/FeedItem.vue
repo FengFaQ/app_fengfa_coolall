@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { renderRichText } from '../utils/richtext'
 
 const props = defineProps<{
   item: Record<string, unknown>
@@ -23,12 +24,9 @@ const title = computed(() => pick('title', 'messageTitle'))
 const message = computed(() => pick('message', 'content', 'description'))
 const avatime = computed(() => pick('dateline', 'createTime', 'time'))
 
-// 文本型动态直接展示 message，其余展示 title
-const summary = computed(() => {
-  const m = message.value
-  if (m) return m.length > 220 ? `${m.slice(0, 220)}…` : m
-  return title.value
-})
+// 富文本：解析 [表情] 与内嵌图片（与详情页一致）。
+// 不再手动截断：卡片内完整展示，emoji 与图片才能正确呈现。
+const summaryHtml = computed(() => renderRichText(message.value || title.value))
 
 function open() {
   if (id.value) router.push(`/feed/${encodeURIComponent(id.value)}`)
@@ -41,7 +39,7 @@ function open() {
       <span v-if="username" class="user">{{ username }}</span>
       <span v-if="avatime" class="muted time">{{ avatime }}</span>
     </header>
-    <p v-if="summary" class="body">{{ summary }}</p>
+    <div v-if="summaryHtml" class="body" v-html="summaryHtml"></div>
     <p v-else class="muted body">（无文本内容）</p>
   </article>
 </template>
