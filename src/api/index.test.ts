@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError, errorMessage } from '../api'
+import { ApiError, errorMessage, unwrapFeedDetail } from '../api'
 
 // 隔离 Tauri 的 invoke，测试纯逻辑部分
 vi.mock('@tauri-apps/api/core', () => ({
@@ -35,10 +35,26 @@ describe('errorMessage', () => {
   })
 })
 
+describe('unwrapFeedDetail', () => {
+  it('提取服务端详情信封中的 data', () => {
+    expect(unwrapFeedDetail({ status: 1, data: { message: '正文' } })).toEqual({ message: '正文' })
+  })
+
+  it('公开页兜底保留原始渲染对象', () => {
+    const page = { isPublic: true, html: '<p>公开内容</p>' }
+    expect(unwrapFeedDetail(page)).toBe(page)
+  })
+
+  it('没有可渲染详情时报告格式错误', () => {
+    expect(() => unwrapFeedDetail({ status: 1, data: [] })).toThrow(ApiError)
+  })
+})
+
 describe('ApiError', () => {
   it('可重试的错误类型正确', () => {
     expect(new ApiError({ kind: 'network', message: 'x' }).retryable).toBe(true)
     expect(new ApiError({ kind: 'http', status: 500 }).retryable).toBe(true)
+    expect(new ApiError({ kind: 'parse', message: 'x' }).retryable).toBe(true)
     expect(new ApiError({ kind: 'rate_limited', message: 'x' }).retryable).toBe(
       true,
     )

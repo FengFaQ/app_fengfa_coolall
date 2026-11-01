@@ -51,7 +51,7 @@ async function openWindow() {
   }
 }
 
-/** 用户点「我已完成验证」：后端读 Cookie 并重放。 */
+/** 用户点「我已完成验证」：后端使用验证窗口回传的 validate 重放原请求。 */
 async function confirmDone() {
   submitting.value = true
   message.value = ''
@@ -117,6 +117,9 @@ onBeforeUnmount(() => {
       </div>
 
       <p v-if="message" :class="failed ? 'err' : 'ok'">{{ message }}</p>
+      <button v-if="failed" class="btn" @click="emit('retry')">
+        重新加载详情
+      </button>
     </template>
 
     <template v-else>

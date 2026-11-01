@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { ApiError, type BackendError } from './index'
+import { ApiError, unwrapFeedDetail, type BackendError } from './index'
 
 /**
  * 人机验证。
@@ -59,5 +59,5 @@ export async function completeCaptcha(): Promise<Record<string, unknown>> {
   if (!res.ok) {
     throw new ApiError(res.error ?? { kind: 'parse', message: '验证未通过' })
   }
-  return res.data ?? {}
+  return unwrapFeedDetail(res.data ?? {})
 }

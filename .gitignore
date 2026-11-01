@@ -30,6 +30,9 @@ Thumbs.db
 .idea/
 *.iml
 
+# 本机监控脚本状态与日志
+_run/
+
 # 本机环境
 .env
 .env.local

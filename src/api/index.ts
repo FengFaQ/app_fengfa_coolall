@@ -41,7 +41,7 @@ export class ApiError extends Error {
   }
 
   get retryable(): boolean {
-    return ['network', 'http', 'rate_limited'].includes(this.detail.kind)
+    return ['network', 'http', 'rate_limited', 'parse'].includes(this.detail.kind)
   }
 
   get needsCaptcha(): boolean {
@@ -92,8 +92,9 @@ export function browse(target: 'home' | 'feed', page = 1) {
   return call<FeedPage>('browse', { target, page })
 }
 
-export function detail(id: string) {
-  return call<Record<string, unknown>>('detail', { id })
+export async function detail(id: string) {
+  const response = await call<Record<string, unknown>>('detail', { id })
+  return unwrapFeedDetail(response)
 }
 
 /**
@@ -103,8 +104,23 @@ export function detail(id: string) {
  * 首次打开失败不弹验证；用户看见错误后点重试，
  * 才把请求标记为「允许验证」，让服务端下发的挑战变成验证窗口。
  */
-export function detailWithCaptcha(id: string) {
-  return call<Record<string, unknown>>('detail_with_captcha', { id })
+export async function detailWithCaptcha(id: string) {
+  const response = await call<Record<string, unknown>>('detail_with_captcha', { id })
+  return unwrapFeedDetail(response)
+}
+
+/** 酷安详情接口返回业务信封；公开页兜底直接返回渲染对象，不能再解一层。 */
+export function unwrapFeedDetail(
+  response: Record<string, unknown>,
+): Record<string, unknown> {
+  if (response.isPublic) return response
+  if (response.data && typeof response.data === 'object' && !Array.isArray(response.data)) {
+    return response.data as Record<string, unknown>
+  }
+  if (typeof response.message === 'string' || typeof response.username === 'string') {
+    return response
+  }
+  throw new ApiError({ kind: 'parse', message: '详情响应缺少有效的 data 对象' })
 }
 
 export function replies(id: string, page = 1) {

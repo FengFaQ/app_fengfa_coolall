@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { detail, detailWithCaptcha, replies, type FeedPage } from '../api'
@@ -76,9 +76,21 @@ onMounted(() => load(false))
  * 不要再发一次 detail 请求——那会白白多消耗一次请求，
  * 而且若凭证是一次性的会立刻失效。
  */
-function onResolved(data: Record<string, unknown>) {
+async function onResolved(data: Record<string, unknown>) {
   content.value = data
   error.value = null
+  replyError.value = null
+  replyList.value = []
+  if (!data.isPublic) {
+    try {
+      const r = await replies(String(route.params.id ?? ''), 1)
+      replyList.value = Array.isArray((r as FeedPage).data)
+        ? ((r as FeedPage).data as Array<Record<string, unknown>>)
+        : []
+    } catch (e) {
+      replyError.value = e
+    }
+  }
 }
 </script>
 
